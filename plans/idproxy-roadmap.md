@@ -33,11 +33,11 @@
 - 📄 詳細: plans/idproxy-m01-project-init.md
 
 ### M02: 基本型定義
-- [ ] Config, OIDCProvider, OAuthConfig 構造体
-- [ ] User 構造体、UserFromContext()
-- [ ] Store インターフェース
-- [ ] Session, AuthCodeData, AccessTokenData 型
-- 📄 詳細: plans/idproxy-m02-types.md（着手時に生成）
+- [x] Config, OIDCProvider, OAuthConfig 構造体
+- [x] User 構造体、UserFromContext()
+- [x] Store インターフェース
+- [x] Session, AuthCodeData, AccessTokenData 型
+- 📄 詳細: plans/idproxy-m02-types.md
 
 ### M03: Config バリデーション
 - [ ] Config.Validate() 実装
