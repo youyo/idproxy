@@ -20,9 +20,9 @@
 | 4 | Dynamic Client Registration (RFC 7591) を MVP に含める | Claude Cowork 互換に実用上必須 |
 
 ## Current Focus
-- **マイルストーン**: M05 MemoryStore - AuthCode・AccessToken CRUD
-- **直近の完了**: M04 MemoryStore - Session CRUD
-- **次のアクション**: SetAuthCode / GetAuthCode / DeleteAuthCode / SetAccessToken / GetAccessToken / DeleteAccessToken
+- **マイルストーン**: M06 MemoryStore - クリーンアップ
+- **直近の完了**: M05 MemoryStore - AuthCode・AccessToken CRUD
+- **次のアクション**: Cleanup() + バックグラウンド goroutine + Close()
 
 ## Progress
 
@@ -53,10 +53,10 @@
 - 📄 詳細: plans/idproxy-m04-memstore-session.md
 
 ### M05: MemoryStore - AuthCode・AccessToken CRUD
-- [ ] SetAuthCode / GetAuthCode / DeleteAuthCode
-- [ ] SetAccessToken / GetAccessToken / DeleteAccessToken
-- [ ] TDD: AuthCode・AccessToken CRUD テスト
-- 📄 詳細: plans/idproxy-m05-memstore-authcode-token.md（着手時に生成）
+- [x] SetAuthCode / GetAuthCode / DeleteAuthCode
+- [x] SetAccessToken / GetAccessToken / DeleteAccessToken
+- [x] TDD: AuthCode・AccessToken CRUD テスト
+- 📄 詳細: plans/idproxy-m05-memstore-authcode-token.md
 
 ### M06: MemoryStore - クリーンアップ
 - [ ] Cleanup() 実装（期限切れエントリ削除）
