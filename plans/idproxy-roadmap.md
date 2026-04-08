@@ -20,16 +20,16 @@
 | 4 | Dynamic Client Registration (RFC 7591) を MVP に含める | Claude Cowork 互換に実用上必須 |
 
 ## Current Focus
-- **マイルストーン**: M01 プロジェクト初期化
-- **直近の完了**: なし
-- **次のアクション**: go.mod 初期化、ディレクトリ構造作成
+- **マイルストーン**: M02 基本型定義
+- **直近の完了**: M01 プロジェクト初期化
+- **次のアクション**: Config, OIDCProvider, Store インターフェース等の型定義
 
 ## Progress
 
 ### M01: プロジェクト初期化
-- [ ] go.mod 初期化、依存ライブラリ追加
-- [ ] ディレクトリ構造作成（store/, cmd/idproxy/, testutil/, examples/）
-- [ ] MIT LICENSE ファイル作成
+- [x] go.mod 初期化（Go 1.26、依存は M02 以降で追加）
+- [x] ディレクトリ構造作成（store/, cmd/idproxy/, testutil/, examples/）
+- [x] MIT LICENSE ファイル作成
 - 📄 詳細: plans/idproxy-m01-project-init.md
 
 ### M02: 基本型定義
