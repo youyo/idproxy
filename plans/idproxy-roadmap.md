@@ -129,12 +129,12 @@
 - [x] TDD: メタデータレスポンス検証テスト
 - 📄 詳細: plans/idproxy-m14-oauth-metadata.md（着手時に生成）
 
-### M15: OAuth 2.1 /authorize
-- [ ] GET /authorize エンドポイント
-- [ ] パラメータ検証（response_type, client_id, redirect_uri, code_challenge, code_challenge_method, state, scope）
-- [ ] PKCE code_challenge 検証（S256 のみ）
-- [ ] IdP 認証への委譲（ブラウザ認証フローと連携）
-- [ ] TDD: 正常系・異常パラメータテスト
+### M15: OAuth 2.1 /authorize ✅
+- [x] GET /authorize エンドポイント
+- [x] パラメータ検証（response_type, client_id, redirect_uri, code_challenge, code_challenge_method, state, scope）
+- [x] PKCE code_challenge 検証（S256 のみ）
+- [x] IdP 認証への委譲（ブラウザ認証フローと連携）
+- [x] TDD: 正常系・異常パラメータテスト
 - 📄 詳細: plans/idproxy-m15-oauth-authorize.md（着手時に生成）
 
 ### M16: OAuth 2.1 /token

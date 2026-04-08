@@ -59,7 +59,7 @@ func New(ctx context.Context, cfg Config) (*Auth, error) {
 	// OAuth 設定がある場合は OAuthServer を初期化
 	var oauthServer http.Handler
 	if cfg.OAuth != nil {
-		srv, err3 := NewOAuthServer(cfg, store)
+		srv, err3 := NewOAuthServer(cfg, store, sm)
 		if err3 != nil {
 			return nil, err3
 		}

@@ -94,6 +94,16 @@ type OAuthConfig struct {
 	// SigningMethod は JWT 署名アルゴリズム。
 	// デフォルト: SigningKey の型から自動判定（ECDSA → ES256, RSA → RS256）。
 	SigningMethod jwt.SigningMethod
+
+	// ClientID は OAuth 2.1 クライアント ID。
+	// 静的クライアント設定用（動的クライアント登録は Phase 3 で追加）。
+	// 空の場合、/authorize エンドポイントは任意の client_id を受け付ける。
+	ClientID string
+
+	// AllowedRedirectURIs は許可するリダイレクト URI のリスト。
+	// /authorize エンドポイントで redirect_uri の検証に使用する。
+	// 空の場合、localhost の URI のみ許可する（開発用）。
+	AllowedRedirectURIs []string
 }
 
 // DefaultConfig は Config のデフォルト値を保持する。
