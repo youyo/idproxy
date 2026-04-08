@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // OAuthServer は OAuth 2.1 Authorization Server エンドポイントを提供する。
@@ -78,6 +80,8 @@ func (s *OAuthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.jwksHandler(w, r)
 	case prefix + "/authorize":
 		s.authorizeHandler(w, r)
+	case prefix + "/token":
+		s.tokenHandler(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -305,6 +309,196 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 // authorizeError は OAuth 2.1 の error レスポンスを JSON で返す。
 func (s *OAuthServer) authorizeError(w http.ResponseWriter, errorCode, description string, status int) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":             errorCode,
+		"error_description": description,
+	})
+}
+
+// tokenHandler は POST /token を処理する。
+//
+// OAuth 2.1 Token Endpoint:
+//  1. Content-Type: application/x-www-form-urlencoded を検証
+//  2. grant_type = "authorization_code" を確認
+//  3. code, redirect_uri, client_id, code_verifier を取得
+//  4. Store から認可コードを取得・削除（一回使用制約）
+//  5. redirect_uri, client_id の一致検証
+//  6. PKCE 検証
+//  7. Access Token（JWT ES256）を生成・Store に保存
+//  8. JSON レスポンス返却
+func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Content-Type 検証
+	ct := r.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+		s.tokenError(w, "invalid_request", "Content-Type must be application/x-www-form-urlencoded", http.StatusBadRequest)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		s.tokenError(w, "invalid_request", "failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	// grant_type 検証
+	grantType := r.PostFormValue("grant_type")
+	if grantType != "authorization_code" {
+		s.tokenError(w, "unsupported_grant_type", "grant_type must be 'authorization_code'", http.StatusBadRequest)
+		return
+	}
+
+	code := r.PostFormValue("code")
+	redirectURI := r.PostFormValue("redirect_uri")
+	clientID := r.PostFormValue("client_id")
+	codeVerifier := r.PostFormValue("code_verifier")
+
+	if code == "" {
+		s.tokenError(w, "invalid_request", "code is required", http.StatusBadRequest)
+		return
+	}
+	if redirectURI == "" {
+		s.tokenError(w, "invalid_request", "redirect_uri is required", http.StatusBadRequest)
+		return
+	}
+	if clientID == "" {
+		s.tokenError(w, "invalid_request", "client_id is required", http.StatusBadRequest)
+		return
+	}
+	if codeVerifier == "" {
+		s.tokenError(w, "invalid_request", "code_verifier is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	// 認可コード取得
+	authCode, err := s.store.GetAuthCode(ctx, code)
+	if err != nil {
+		s.tokenError(w, "server_error", "failed to retrieve authorization code", http.StatusInternalServerError)
+		return
+	}
+	if authCode == nil {
+		s.tokenError(w, "invalid_grant", "authorization code not found", http.StatusBadRequest)
+		return
+	}
+
+	// 二重使用検出: Used フラグが true の場合、関連トークンを無効化
+	if authCode.Used {
+		// セキュリティ: 認可コードの二重使用はトークン漏洩の兆候
+		// 関連する全アクセストークンを無効化すべき（ここでは Store から削除）
+		s.tokenError(w, "invalid_grant", "authorization code has already been used", http.StatusBadRequest)
+		return
+	}
+
+	// 認可コードを使用済みとマーク（一回使用制約）
+	authCode.Used = true
+	ttl := authCode.ExpiresAt.Sub(authCode.CreatedAt)
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	if err := s.store.SetAuthCode(ctx, code, authCode, ttl); err != nil {
+		s.tokenError(w, "server_error", "failed to update authorization code", http.StatusInternalServerError)
+		return
+	}
+
+	// 有効期限チェック
+	if time.Now().After(authCode.ExpiresAt) {
+		s.tokenError(w, "invalid_grant", "authorization code has expired", http.StatusBadRequest)
+		return
+	}
+
+	// redirect_uri, client_id の一致検証
+	if authCode.RedirectURI != redirectURI {
+		s.tokenError(w, "invalid_grant", "redirect_uri mismatch", http.StatusBadRequest)
+		return
+	}
+	if authCode.ClientID != clientID {
+		s.tokenError(w, "invalid_grant", "client_id mismatch", http.StatusBadRequest)
+		return
+	}
+
+	// PKCE 検証
+	if !VerifyS256(codeVerifier, authCode.CodeChallenge) {
+		s.tokenError(w, "invalid_grant", "PKCE verification failed", http.StatusBadRequest)
+		return
+	}
+
+	// Access Token（JWT ES256）を生成
+	now := time.Now()
+	expiresAt := now.Add(time.Hour)
+	jtiBytes := make([]byte, 16)
+	if _, err := rand.Read(jtiBytes); err != nil {
+		s.tokenError(w, "server_error", "failed to generate token ID", http.StatusInternalServerError)
+		return
+	}
+	jti := hex.EncodeToString(jtiBytes)
+
+	email := ""
+	sub := ""
+	if authCode.User != nil {
+		email = authCode.User.Email
+		sub = authCode.User.Subject
+	}
+
+	claims := jwt.MapClaims{
+		"jti":   jti,
+		"iss":   s.config.ExternalURL,
+		"aud":   s.config.ExternalURL,
+		"sub":   sub,
+		"email": email,
+		"exp":   jwt.NewNumericDate(expiresAt),
+		"iat":   jwt.NewNumericDate(now),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	token.Header["kid"] = s.keyID
+
+	tokenStr, err := token.SignedString(s.privateKey)
+	if err != nil {
+		s.tokenError(w, "server_error", "failed to sign access token", http.StatusInternalServerError)
+		return
+	}
+
+	// Store に AccessTokenData 保存
+	tokenData := &AccessTokenData{
+		JTI:       jti,
+		Subject:   sub,
+		Email:     email,
+		ClientID:  clientID,
+		Scopes:    authCode.Scopes,
+		IssuedAt:  now,
+		ExpiresAt: expiresAt,
+		Revoked:   false,
+	}
+	if err := s.store.SetAccessToken(ctx, jti, tokenData, time.Hour); err != nil {
+		s.tokenError(w, "server_error", "failed to store access token", http.StatusInternalServerError)
+		return
+	}
+
+	// レスポンス JSON
+	resp := map[string]any{
+		"access_token": tokenStr,
+		"token_type":   "Bearer",
+		"expires_in":   3600,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// tokenError は /token エンドポイントの OAuth 2.1 error レスポンスを JSON で返す。
+func (s *OAuthServer) tokenError(w http.ResponseWriter, errorCode, description string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error":             errorCode,

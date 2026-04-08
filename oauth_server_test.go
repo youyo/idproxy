@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // --- OAuthServer テスト用ヘルパー ---
@@ -1021,5 +1023,491 @@ func assertStringSliceField(t *testing.T, m map[string]any, key string, expected
 		if str != expected[i] {
 			t.Errorf("field %q[%d]: expected %q, got %q", key, i, expected[i], str)
 		}
+	}
+}
+
+// --- /token エンドポイント テスト ---
+
+// setupTokenServer はテスト用の OAuthServer を構築し、認可コードを事前に Store に保存する。
+// code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk" (RFC 7636 Appendix B)
+// code_challenge = S256(code_verifier) = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+func setupTokenServer(t *testing.T) (*OAuthServer, *testMemoryStore, string) {
+	t.Helper()
+	srv, _, st := setupAuthorizeServer(t)
+
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	codeChallenge := S256Challenge(codeVerifier)
+
+	code := "test-auth-code-1234567890abcdef"
+
+	authCodeData := &AuthCodeData{
+		Code:                code,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User: &User{
+			Email:   "test@example.com",
+			Name:    "Test User",
+			Subject: "sub-123",
+			Issuer:  "https://accounts.google.com",
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+		Used:      false,
+	}
+
+	ctx := context.Background()
+	if err := st.SetAuthCode(ctx, code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	return srv, st, code
+}
+
+// validTokenForm は正常な /token リクエストのフォームデータを返す。
+func validTokenForm(code string) url.Values {
+	return url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"http://localhost:3000/callback"},
+		"client_id":     {"test-oauth-client"},
+		"code_verifier": {"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"},
+	}
+}
+
+func TestToken_Success(t *testing.T) {
+	srv, st, code := setupTokenServer(t)
+	form := validTokenForm(code)
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// Content-Type 検証
+	ct := w.Header().Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", ct)
+	}
+
+	// Cache-Control 検証
+	cc := w.Header().Get("Cache-Control")
+	if cc != "no-store" {
+		t.Errorf("expected Cache-Control no-store, got %q", cc)
+	}
+
+	// レスポンス JSON パース
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// access_token が存在する
+	accessToken, ok := resp["access_token"].(string)
+	if !ok || accessToken == "" {
+		t.Fatal("expected non-empty access_token in response")
+	}
+
+	// token_type = Bearer
+	tokenType, ok := resp["token_type"].(string)
+	if !ok || tokenType != "Bearer" {
+		t.Errorf("expected token_type Bearer, got %q", tokenType)
+	}
+
+	// expires_in = 3600
+	expiresIn, ok := resp["expires_in"].(float64)
+	if !ok || expiresIn != 3600 {
+		t.Errorf("expected expires_in 3600, got %v", resp["expires_in"])
+	}
+
+	// JWT を検証: パースして claims を確認
+	parser := jwt.NewParser(jwt.WithValidMethods([]string{"ES256"}))
+	token, err := parser.Parse(accessToken, func(token *jwt.Token) (interface{}, error) {
+		return &srv.privateKey.PublicKey, nil
+	})
+	if err != nil {
+		t.Fatalf("failed to parse JWT: %v", err)
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		t.Fatal("failed to extract JWT claims")
+	}
+
+	// claims 検証
+	if claims["iss"] != "http://localhost:8080" {
+		t.Errorf("expected iss 'http://localhost:8080', got %v", claims["iss"])
+	}
+	if claims["sub"] != "sub-123" {
+		t.Errorf("expected sub 'sub-123', got %v", claims["sub"])
+	}
+	if claims["email"] != "test@example.com" {
+		t.Errorf("expected email 'test@example.com', got %v", claims["email"])
+	}
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
+		t.Error("expected non-empty jti claim")
+	}
+
+	// Store に AccessTokenData が保存されている
+	ctx := context.Background()
+	tokenData, err := st.GetAccessToken(ctx, jti)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tokenData == nil {
+		t.Fatal("access token not found in store")
+	}
+	if tokenData.Email != "test@example.com" {
+		t.Errorf("expected email %q, got %q", "test@example.com", tokenData.Email)
+	}
+	if tokenData.ClientID != "test-oauth-client" {
+		t.Errorf("expected ClientID %q, got %q", "test-oauth-client", tokenData.ClientID)
+	}
+	if tokenData.Revoked {
+		t.Error("expected Revoked=false for new token")
+	}
+
+	// 認可コードが Used=true にマークされている
+	authCode, _ := st.GetAuthCode(ctx, code)
+	if authCode == nil {
+		t.Fatal("auth code should still exist in store (marked as used)")
+	}
+	if !authCode.Used {
+		t.Error("expected auth code Used=true after token exchange")
+	}
+}
+
+func TestToken_MethodNotAllowed(t *testing.T) {
+	srv, _, _ := setupTokenServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/token", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected %d, got %d", http.StatusMethodNotAllowed, w.Code)
+	}
+}
+
+func TestToken_WrongContentType(t *testing.T) {
+	srv, _, code := setupTokenServer(t)
+	form := validTokenForm(code)
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	assertErrorResponse(t, w, "invalid_request")
+}
+
+func TestToken_UnsupportedGrantType(t *testing.T) {
+	srv, _, code := setupTokenServer(t)
+	form := validTokenForm(code)
+	form.Set("grant_type", "client_credentials")
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	assertErrorResponse(t, w, "unsupported_grant_type")
+}
+
+func TestToken_MissingCode(t *testing.T) {
+	srv, _, _ := setupTokenServer(t)
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"redirect_uri":  {"http://localhost:3000/callback"},
+		"client_id":     {"test-oauth-client"},
+		"code_verifier": {"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	assertErrorResponse(t, w, "invalid_request")
+}
+
+func TestToken_MissingCodeVerifier(t *testing.T) {
+	srv, _, code := setupTokenServer(t)
+	form := validTokenForm(code)
+	form.Del("code_verifier")
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	assertErrorResponse(t, w, "invalid_request")
+}
+
+func TestToken_InvalidCode(t *testing.T) {
+	srv, _, _ := setupTokenServer(t)
+	form := validTokenForm("nonexistent-code")
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	assertErrorResponse(t, w, "invalid_grant")
+}
+
+func TestToken_RedirectURIMismatch(t *testing.T) {
+	srv, _, code := setupTokenServer(t)
+	form := validTokenForm(code)
+	form.Set("redirect_uri", "https://evil.example.com/callback")
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	assertErrorResponse(t, w, "invalid_grant")
+}
+
+func TestToken_ClientIDMismatch(t *testing.T) {
+	srv, _, code := setupTokenServer(t)
+	form := validTokenForm(code)
+	form.Set("client_id", "wrong-client")
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	assertErrorResponse(t, w, "invalid_grant")
+}
+
+func TestToken_PKCEVerificationFailed(t *testing.T) {
+	srv, _, code := setupTokenServer(t)
+	form := validTokenForm(code)
+	form.Set("code_verifier", "wrong-verifier-value")
+
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	assertErrorResponse(t, w, "invalid_grant")
+}
+
+func TestToken_DoubleUse(t *testing.T) {
+	srv, st, code := setupTokenServer(t)
+
+	// 1回目: 成功
+	form1 := validTokenForm(code)
+	req1 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form1.Encode()))
+	req1.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first token request: expected %d, got %d; body: %s", http.StatusOK, w1.Code, w1.Body.String())
+	}
+
+	// 1回目のレスポンスからトークンの jti を取得（Store に保存されているか確認用）
+	var resp1 map[string]any
+	if err := json.NewDecoder(w1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("failed to decode first response: %v", err)
+	}
+	accessToken1 := resp1["access_token"].(string)
+
+	// JWT から jti を取得
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	token1, _, err := parser.ParseUnverified(accessToken1, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("failed to parse first token: %v", err)
+	}
+	jti1 := token1.Claims.(jwt.MapClaims)["jti"].(string)
+
+	// 1回目のトークンが Store にあることを確認
+	ctx := context.Background()
+	tokenData, _ := st.GetAccessToken(ctx, jti1)
+	if tokenData == nil {
+		t.Fatal("first token should exist in store")
+	}
+
+	// 2回目: 二重使用 → invalid_grant
+	form2 := validTokenForm(code)
+	req2 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("second token request: expected %d, got %d; body: %s", http.StatusBadRequest, w2.Code, w2.Body.String())
+	}
+	assertErrorResponse(t, w2, "invalid_grant")
+}
+
+func TestToken_ExpiredCode(t *testing.T) {
+	srv, st, _ := setupTokenServer(t)
+
+	// 有効期限切れの認可コードを作成
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	codeChallenge := S256Challenge(codeVerifier)
+	expiredCode := "expired-auth-code-1234567890"
+
+	authCodeData := &AuthCodeData{
+		Code:                expiredCode,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User: &User{
+			Email:   "test@example.com",
+			Name:    "Test User",
+			Subject: "sub-123",
+			Issuer:  "https://accounts.google.com",
+		},
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+		ExpiresAt: time.Now().Add(-5 * time.Minute), // 5分前に有効期限切れ
+		Used:      false,
+	}
+
+	ctx := context.Background()
+	if err := st.SetAuthCode(ctx, expiredCode, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	form := validTokenForm(expiredCode)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	assertErrorResponse(t, w, "invalid_grant")
+}
+
+func TestToken_WithPathPrefix(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate ECDSA key: %v", err)
+	}
+
+	st := newTestMemoryStore()
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{
+				Issuer:       "https://accounts.google.com",
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		PathPrefix:   "/auth",
+		Store:        st,
+		OAuth: &OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "test-oauth-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback"},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate() failed: %v", err)
+	}
+
+	srv, err := NewOAuthServer(cfg, st, nil)
+	if err != nil {
+		t.Fatalf("NewOAuthServer() failed: %v", err)
+	}
+
+	// 認可コードを Store に保存
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	codeChallenge := S256Challenge(codeVerifier)
+	code := "test-auth-code-with-prefix"
+
+	authCodeData := &AuthCodeData{
+		Code:                code,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User: &User{
+			Email:   "test@example.com",
+			Name:    "Test User",
+			Subject: "sub-123",
+			Issuer:  "https://accounts.google.com",
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+		Used:      false,
+	}
+
+	ctx := context.Background()
+	if err := st.SetAuthCode(ctx, code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"http://localhost:3000/callback"},
+		"client_id":     {"test-oauth-client"},
+		"code_verifier": {codeVerifier},
+	}
+
+	// PathPrefix 付き /auth/token
+	req := httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if _, ok := resp["access_token"].(string); !ok {
+		t.Error("expected access_token in response")
+	}
+	if resp["token_type"] != "Bearer" {
+		t.Errorf("expected token_type Bearer, got %v", resp["token_type"])
 	}
 }

@@ -137,15 +137,15 @@
 - [x] TDD: 正常系・異常パラメータテスト
 - 📄 詳細: plans/idproxy-m15-oauth-authorize.md（着手時に生成）
 
-### M16: OAuth 2.1 /token
-- [ ] POST /token エンドポイント
-- [ ] grant_type=authorization_code 処理
-- [ ] 認可コード取得・有効性検証
-- [ ] PKCE 検証（SHA256(code_verifier) == code_challenge）
-- [ ] Access Token（JWT ES256）署名・発行
-- [ ] Store に AccessTokenData 保存
-- [ ] 認可コード一回使用制約（二重使用時トークン無効化）
-- [ ] TDD: トークン発行・PKCE検証・二重使用テスト
+### M16: OAuth 2.1 /token ✅
+- [x] POST /token エンドポイント
+- [x] grant_type=authorization_code 処理
+- [x] 認可コード取得・有効性検証
+- [x] PKCE 検証（SHA256(code_verifier) == code_challenge）
+- [x] Access Token（JWT ES256）署名・発行
+- [x] Store に AccessTokenData 保存
+- [x] 認可コード一回使用制約（二重使用時トークン無効化）
+- [x] TDD: トークン発行・PKCE検証・二重使用テスト
 - 📄 詳細: plans/idproxy-m16-oauth-token.md（着手時に生成）
 
 ### M17: Dynamic Client Registration
