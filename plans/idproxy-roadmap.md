@@ -166,12 +166,12 @@
 - [x] TDD: 環境変数パーステスト、SSE パススルーテスト
 - 📄 詳細: plans/idproxy-m18-standalone-proxy.md（着手時に生成）
 
-### M19: 統合テスト
-- [ ] ブラウザ認証フロー E2E（モック IdP → Cookie → upstream）
-- [ ] OAuth 2.1 フロー E2E（メタデータ → authorize → token → Bearer → upstream）
-- [ ] DCR → OAuth 2.1 フロー E2E
-- [ ] SSE パススルー E2E（認証付き SSE 接続）
-- [ ] 複数 IdP 同時テスト
+### M19: 統合テスト ✅
+- [x] ブラウザ認証フロー E2E（モック IdP → Cookie → upstream）
+- [x] OAuth 2.1 フロー E2E（メタデータ → authorize → token → Bearer → upstream）
+- [x] DCR → OAuth 2.1 フロー E2E
+- [x] SSE パススルー E2E（認証付き SSE 接続）
+- [x] 複数 IdP 同時テスト
 - 📄 詳細: plans/idproxy-m19-integration-tests.md（着手時に生成）
 
 ### M20: ドキュメント・CI/CD・リリース
