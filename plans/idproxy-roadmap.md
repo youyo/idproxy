@@ -20,9 +20,9 @@
 | 4 | Dynamic Client Registration (RFC 7591) を MVP に含める | Claude Cowork 互換に実用上必須 |
 
 ## Current Focus
-- **マイルストーン**: M09 セッション管理
-- **直近の完了**: M08 テストユーティリティ（モック IdP）
-- **次のアクション**: SessionManager 構造体・Cookie 暗号化（gorilla/securecookie）実装
+- **マイルストーン**: M10 OIDC プロバイダー管理
+- **直近の完了**: M09 セッション管理
+- **次のアクション**: ProviderManager 構造体・OIDC Discovery 実装
 
 ## Progress
 
@@ -79,13 +79,13 @@
 - [x] Authorization エンドポイント（コールバックリダイレクト）
 - 📄 詳細: plans/idproxy-m08-mock-idp.md
 
-### M09: セッション管理
-- [ ] SessionManager 構造体
-- [ ] Cookie 暗号化（gorilla/securecookie）
-- [ ] セッション Cookie 発行・読み取り・削除
-- [ ] セッション有効期限管理
-- [ ] TDD: Cookie 暗号化・復号テスト、セッション CRUD テスト
-- 📄 詳細: plans/idproxy-m09-session-manager.md（着手時に生成）
+### M09: セッション管理 ✅
+- [x] SessionManager 構造体
+- [x] Cookie 暗号化（gorilla/securecookie）
+- [x] セッション Cookie 発行・読み取り・削除
+- [x] セッション有効期限管理
+- [x] TDD: Cookie 暗号化・復号テスト、セッション CRUD テスト
+- 📄 詳細: plans/idproxy-m09-session-manager.md
 
 ### M10: OIDC プロバイダー管理
 - [ ] ProviderManager 構造体
