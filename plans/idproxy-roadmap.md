@@ -156,14 +156,14 @@
 - [x] TDD: 登録・取得テスト
 - 📄 詳細: plans/idproxy-m17-dcr.md（着手時に生成）
 
-### M18: スタンドアロンプロキシ・SSE パススルー
-- [ ] cmd/idproxy/main.go エントリポイント
-- [ ] 環境変数パース → Config 構築
-- [ ] httputil.ReverseProxy + FlushInterval:-1
-- [ ] SSE ストリーミングパススルー
-- [ ] ヘルスチェック（/healthz）
-- [ ] グレースフルシャットダウン
-- [ ] TDD: 環境変数パーステスト、SSE パススルーテスト
+### M18: スタンドアロンプロキシ・SSE パススルー ✅
+- [x] cmd/idproxy/main.go エントリポイント
+- [x] 環境変数パース → Config 構築
+- [x] httputil.ReverseProxy + FlushInterval:-1
+- [x] SSE ストリーミングパススルー
+- [x] ヘルスチェック（/healthz）
+- [x] グレースフルシャットダウン
+- [x] TDD: 環境変数パーステスト、SSE パススルーテスト
 - 📄 詳細: plans/idproxy-m18-standalone-proxy.md（着手時に生成）
 
 ### M19: 統合テスト
