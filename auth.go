@@ -56,6 +56,16 @@ func New(ctx context.Context, cfg Config) (*Auth, error) {
 		}
 	}
 
+	// OAuth 設定がある場合は OAuthServer を初期化
+	var oauthServer http.Handler
+	if cfg.OAuth != nil {
+		srv, err3 := NewOAuthServer(cfg, store)
+		if err3 != nil {
+			return nil, err3
+		}
+		oauthServer = srv
+	}
+
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -67,6 +77,7 @@ func New(ctx context.Context, cfg Config) (*Auth, error) {
 		sessionManager:  sm,
 		browserAuth:     ba,
 		bearerValidator: bv,
+		oauthServer:     oauthServer,
 		store:           store,
 		logger:          logger,
 	}, nil

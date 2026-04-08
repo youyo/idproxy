@@ -122,11 +122,11 @@
 - [x] TDD: 有効/無効/期限切れ JWT テスト
 - 📄 詳細: plans/idproxy-m13-bearer-token.md（着手時に生成）
 
-### M14: OAuth 2.1 メタデータ
-- [ ] GET /.well-known/oauth-authorization-server
-- [ ] RFC 8414 準拠レスポンス JSON
-- [ ] PathPrefix 対応
-- [ ] TDD: メタデータレスポンス検証テスト
+### M14: OAuth 2.1 メタデータ ✅
+- [x] GET /.well-known/oauth-authorization-server
+- [x] RFC 8414 準拠レスポンス JSON
+- [x] PathPrefix 対応
+- [x] TDD: メタデータレスポンス検証テスト
 - 📄 詳細: plans/idproxy-m14-oauth-metadata.md（着手時に生成）
 
 ### M15: OAuth 2.1 /authorize
