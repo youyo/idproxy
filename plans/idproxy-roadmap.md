@@ -46,11 +46,11 @@
 - 📄 詳細: plans/idproxy-m03-config-validation.md（着手時に生成）
 
 ### M04: MemoryStore - Session CRUD
-- [ ] MemoryStore 構造体・コンストラクタ
-- [ ] SetSession / GetSession / DeleteSession
-- [ ] TTL チェック（Get 時）
-- [ ] TDD: Session CRUD テスト
-- 📄 詳細: plans/idproxy-m04-memstore-session.md（着手時に生成）
+- [x] MemoryStore 構造体・コンストラクタ
+- [x] SetSession / GetSession / DeleteSession
+- [x] TTL チェック（Get 時）
+- [x] TDD: Session CRUD テスト
+- 📄 詳細: plans/idproxy-m04-memstore-session.md
 
 ### M05: MemoryStore - AuthCode・AccessToken CRUD
 - [ ] SetAuthCode / GetAuthCode / DeleteAuthCode
