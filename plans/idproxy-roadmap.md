@@ -174,14 +174,13 @@
 - [x] 複数 IdP 同時テスト
 - 📄 詳細: plans/idproxy-m19-integration-tests.md（着手時に生成）
 
-### M20: ドキュメント・CI/CD・リリース
-- [ ] README.md（概要、クイックスタート、設定一覧）
-- [ ] examples/basic/main.go
-- [ ] examples/mcp-server/main.go
-- [ ] .goreleaser.yml
-- [ ] .github/workflows/ci.yml（テスト、lint、ビルド）
-- [ ] .github/workflows/release.yml（tag → GoReleaser）
-- 📄 詳細: plans/idproxy-m20-docs-cicd.md（着手時に生成）
+### M20: ドキュメント・CI/CD・リリース ✅
+- [x] README.md（概要、クイックスタート、設定一覧）
+- [x] examples/basic/main.go
+- [x] examples/mcp-server/main.go
+- [x] .goreleaser.yml
+- [x] .github/workflows/ci.yml（テスト、lint、ビルド）
+- [x] .github/workflows/release.yml（tag → GoReleaser）
 
 ## Blockers
 なし
