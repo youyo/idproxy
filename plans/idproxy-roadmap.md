@@ -20,9 +20,9 @@
 | 4 | Dynamic Client Registration (RFC 7591) を MVP に含める | Claude Cowork 互換に実用上必須 |
 
 ## Current Focus
-- **マイルストーン**: M08 テストユーティリティ（モック IdP）
-- **直近の完了**: M07 PKCE ユーティリティ
-- **次のアクション**: testutil/mock_idp.go: テスト用 OIDC IdP サーバー実装
+- **マイルストーン**: M09 セッション管理
+- **直近の完了**: M08 テストユーティリティ（モック IdP）
+- **次のアクション**: SessionManager 構造体・Cookie 暗号化（gorilla/securecookie）実装
 
 ## Progress
 
@@ -71,13 +71,13 @@
 - [x] TDD: S256 生成・検証テスト（RFC 7636 テストベクター使用）
 - 📄 詳細: plans/idproxy-m07-pkce.md
 
-### M08: テストユーティリティ（モック IdP）
-- [ ] testutil/mock_idp.go: テスト用 OIDC IdP サーバー
-- [ ] OIDC Discovery エンドポイント (.well-known/openid-configuration)
-- [ ] JWKS エンドポイント
-- [ ] Token エンドポイント（ID Token 発行）
-- [ ] Authorization エンドポイント（コールバックリダイレクト）
-- 📄 詳細: plans/idproxy-m08-mock-idp.md（着手時に生成）
+### M08: テストユーティリティ（モック IdP） ✅
+- [x] testutil/mock_idp.go: テスト用 OIDC IdP サーバー
+- [x] OIDC Discovery エンドポイント (.well-known/openid-configuration)
+- [x] JWKS エンドポイント
+- [x] Token エンドポイント（ID Token 発行）
+- [x] Authorization エンドポイント（コールバックリダイレクト）
+- 📄 詳細: plans/idproxy-m08-mock-idp.md
 
 ### M09: セッション管理
 - [ ] SessionManager 構造体
