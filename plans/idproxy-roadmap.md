@@ -20,9 +20,9 @@
 | 4 | Dynamic Client Registration (RFC 7591) を MVP に含める | Claude Cowork 互換に実用上必須 |
 
 ## Current Focus
-- **マイルストーン**: M07 PKCE ユーティリティ
-- **直近の完了**: M06 MemoryStore - クリーンアップ
-- **次のアクション**: S256 コードチャレンジ生成・検証
+- **マイルストーン**: M08 テストユーティリティ（モック IdP）
+- **直近の完了**: M07 PKCE ユーティリティ
+- **次のアクション**: testutil/mock_idp.go: テスト用 OIDC IdP サーバー実装
 
 ## Progress
 
@@ -65,11 +65,11 @@
 - [x] TDD: クリーンアップテスト
 - 📄 詳細: plans/idproxy-m06-memstore-cleanup.md
 
-### M07: PKCE ユーティリティ
-- [ ] S256 コードチャレンジ生成
-- [ ] コードチャレンジ検証（code_verifier → SHA256 → base64url 比較）
-- [ ] TDD: S256 生成・検証テスト（RFC 7636 テストベクター使用）
-- 📄 詳細: plans/idproxy-m07-pkce.md（着手時に生成）
+### M07: PKCE ユーティリティ ✅
+- [x] S256 コードチャレンジ生成
+- [x] コードチャレンジ検証（code_verifier → SHA256 → base64url 比較）
+- [x] TDD: S256 生成・検証テスト（RFC 7636 テストベクター使用）
+- 📄 詳細: plans/idproxy-m07-pkce.md
 
 ### M08: テストユーティリティ（モック IdP）
 - [ ] testutil/mock_idp.go: テスト用 OIDC IdP サーバー
