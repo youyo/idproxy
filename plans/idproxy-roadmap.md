@@ -115,11 +115,11 @@
 - 📄 詳細: plans/idproxy-m12-auth-wrap.md（着手時に生成）
 
 ### M13: Bearer Token 検証
-- [ ] JWT 署名検証（ES256 公開鍵）
-- [ ] クレーム検証（iss, exp, aud, email）
-- [ ] Store でリボケーションチェック
-- [ ] WWW-Authenticate ヘッダー付き 401 レスポンス
-- [ ] TDD: 有効/無効/期限切れ JWT テスト
+- [x] JWT 署名検証（ES256 公開鍵）
+- [x] クレーム検証（iss, exp, aud, email）
+- [x] Store でリボケーションチェック
+- [x] WWW-Authenticate ヘッダー付き 401 レスポンス
+- [x] TDD: 有効/無効/期限切れ JWT テスト
 - 📄 詳細: plans/idproxy-m13-bearer-token.md（着手時に生成）
 
 ### M14: OAuth 2.1 メタデータ

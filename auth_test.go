@@ -149,9 +149,9 @@ func TestWrap_OAuthASPaths_WithOAuthServer(t *testing.T) {
 	}
 }
 
-// TestWrap_BearerToken は Bearer トークン付きリクエストが
-// 401 を返すことを検証する（M13 で JWT 検証を実装予定）。
-func TestWrap_BearerToken(t *testing.T) {
+// TestWrap_BearerToken_NoOAuth は OAuth 未設定時に Bearer トークン付きリクエストが
+// WWW-Authenticate ヘッダー付き 401 を返すことを検証する。
+func TestWrap_BearerToken_NoOAuth(t *testing.T) {
 	a, _ := setupAuth(t)
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("next handler should not be called for Bearer token")
@@ -164,7 +164,133 @@ func TestWrap_BearerToken(t *testing.T) {
 	a.Wrap(next).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for Bearer token (stub), got %d", rec.Code)
+		t.Errorf("expected 401 for Bearer token without OAuth, got %d", rec.Code)
+	}
+
+	wwwAuth := rec.Header().Get("WWW-Authenticate")
+	if wwwAuth == "" {
+		t.Error("WWW-Authenticate header should be present")
+	}
+}
+
+// TestWrap_BearerToken_ValidJWT は有効な Bearer JWT トークンが
+// next ハンドラーに委譲され、User がコンテキストに注入されることを検証する。
+func TestWrap_BearerToken_ValidJWT(t *testing.T) {
+	idp := testutil.NewMockIdP(t)
+	st := newTestMemoryStore()
+
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{
+				Issuer:       idp.Issuer(),
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: []byte("test-cookie-secret-32-bytes-long!"),
+		Store:        st,
+		OAuth: &OAuthConfig{
+			SigningKey: idp.PrivateKey(),
+		},
+	}
+
+	a, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	ctx := context.Background()
+	jti := "wrap-test-jti"
+	email := "bearer@example.com"
+	sub := "sub-bearer"
+	exp := time.Now().Add(time.Hour)
+
+	_ = st.SetAccessToken(ctx, jti, &AccessTokenData{
+		JTI:       jti,
+		Subject:   sub,
+		Email:     email,
+		ClientID:  "test-client-id",
+		IssuedAt:  time.Now(),
+		ExpiresAt: exp,
+		Revoked:   false,
+	}, time.Hour)
+
+	token, tokenErr := idp.IssueAccessToken("http://localhost:8080", "http://localhost:8080", sub, email, "Bearer User", jti, exp)
+	if tokenErr != nil {
+		t.Fatalf("IssueAccessToken() failed: %v", tokenErr)
+	}
+
+	var gotUser *User
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for valid Bearer JWT, got %d", rec.Code)
+	}
+	if gotUser == nil {
+		t.Fatal("User should be injected into context")
+	}
+	if gotUser.Email != email {
+		t.Errorf("expected email %q, got %q", email, gotUser.Email)
+	}
+	if gotUser.Subject != sub {
+		t.Errorf("expected subject %q, got %q", sub, gotUser.Subject)
+	}
+}
+
+// TestWrap_BearerToken_InvalidJWT は無効な Bearer JWT トークンが
+// WWW-Authenticate ヘッダー付き 401 を返すことを検証する。
+func TestWrap_BearerToken_InvalidJWT(t *testing.T) {
+	idp := testutil.NewMockIdP(t)
+	st := newTestMemoryStore()
+
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{
+				Issuer:       idp.Issuer(),
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: []byte("test-cookie-secret-32-bytes-long!"),
+		Store:        st,
+		OAuth: &OAuthConfig{
+			SigningKey: idp.PrivateKey(),
+		},
+	}
+
+	a, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for invalid Bearer token")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req.Header.Set("Authorization", "Bearer invalid-jwt-token")
+	rec := httptest.NewRecorder()
+
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for invalid Bearer JWT, got %d", rec.Code)
+	}
+
+	wwwAuth := rec.Header().Get("WWW-Authenticate")
+	if wwwAuth == "" {
+		t.Error("WWW-Authenticate header should be present for invalid Bearer token")
 	}
 }
 

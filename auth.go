@@ -17,6 +17,9 @@ type Auth struct {
 	sessionManager  *SessionManager
 	browserAuth     *BrowserAuth
 	store           Store
+	// bearerValidator は Bearer JWT トークンの検証を行う。
+	// Config.OAuth が設定されている場合のみ非 nil。
+	bearerValidator *BearerValidator
 	// oauthServer は M14-M17 で設定する OAuth 2.1 AS ハンドラー。
 	// nil の場合、OAuth AS パスへのリクエストは 501 を返す。
 	oauthServer http.Handler
@@ -43,6 +46,16 @@ func New(ctx context.Context, cfg Config) (*Auth, error) {
 
 	ba := NewBrowserAuth(cfg, pm, sm, store)
 
+	// OAuth 設定がある場合は BearerValidator を初期化
+	var bv *BearerValidator
+	if cfg.OAuth != nil {
+		var err2 error
+		bv, err2 = NewBearerValidator(cfg, store)
+		if err2 != nil {
+			return nil, err2
+		}
+	}
+
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -53,6 +66,7 @@ func New(ctx context.Context, cfg Config) (*Auth, error) {
 		providerManager: pm,
 		sessionManager:  sm,
 		browserAuth:     ba,
+		bearerValidator: bv,
 		store:           store,
 		logger:          logger,
 	}, nil
@@ -109,9 +123,24 @@ func (a *Auth) Wrap(next http.Handler) http.Handler {
 
 		// 3. Bearer トークン判定
 		if token := extractBearerToken(r); token != "" {
-			// M13 で JWT 検証を実装予定。今はスタブで 401 を返す。
-			a.logger.Debug("bearer token received, JWT verification not yet implemented")
-			http.Error(w, "bearer token verification not implemented", http.StatusUnauthorized)
+			if a.bearerValidator == nil {
+				a.logger.Debug("bearer token received but OAuth is not configured")
+				w.Header().Set("WWW-Authenticate", `Bearer realm="idproxy", error="invalid_token", error_description="OAuth is not configured"`)
+				http.Error(w, "OAuth is not configured", http.StatusUnauthorized)
+				return
+			}
+
+			user, err := a.bearerValidator.Validate(r.Context(), token)
+			if err != nil {
+				a.logger.Debug("bearer token validation failed", "error", err)
+				w.Header().Set("WWW-Authenticate", `Bearer realm="idproxy", error="invalid_token"`)
+				http.Error(w, "invalid bearer token", http.StatusUnauthorized)
+				return
+			}
+
+			// 認証済み: User をコンテキストに注入して next に委譲
+			ctx := newContextWithUser(r.Context(), user)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 

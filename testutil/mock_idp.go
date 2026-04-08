@@ -77,6 +77,38 @@ func (m *MockIdP) Issuer() string {
 	return m.Server.URL
 }
 
+// PublicKey は JWT 署名検証用の ECDSA 公開鍵を返す。
+func (m *MockIdP) PublicKey() *ecdsa.PublicKey {
+	return &m.privateKey.PublicKey
+}
+
+// PrivateKey は JWT 署名用の ECDSA 秘密鍵を返す。
+// テストで idproxy が発行するアクセストークンを生成する際に使用する。
+func (m *MockIdP) PrivateKey() *ecdsa.PrivateKey {
+	return m.privateKey
+}
+
+// IssueAccessToken は idproxy が発行するアクセストークン（JWT）を生成する。
+// テストで Bearer Token 検証を検証する際に使用する。
+func (m *MockIdP) IssueAccessToken(issuer, audience, subject, email, name, jti string, expiresAt time.Time) (string, error) {
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"iss":   issuer,
+		"sub":   subject,
+		"aud":   jwt.ClaimStrings{audience},
+		"email": email,
+		"name":  name,
+		"jti":   jti,
+		"iat":   now.Unix(),
+		"exp":   expiresAt.Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	token.Header["kid"] = m.keyID
+
+	return token.SignedString(m.privateKey)
+}
+
 // IssueCode は指定した subject/email/clientID/nonce に紐づく Authorization Code を直接生成する。
 // テストで /authorize を経由せずにトークン取得フローを検証したい場合に使用する。
 func (m *MockIdP) IssueCode(subject, email, clientID, nonce string) string {

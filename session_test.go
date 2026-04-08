@@ -16,15 +16,17 @@ import (
 // testMemoryStore はテスト専用のシンプルな Store 実装。
 // store.MemoryStore は循環インポートになるため使用できない。
 type testMemoryStore struct {
-	mu        sync.RWMutex
-	sessions  map[string]*Session
-	authCodes map[string]*AuthCodeData
+	mu           sync.RWMutex
+	sessions     map[string]*Session
+	authCodes    map[string]*AuthCodeData
+	accessTokens map[string]*AccessTokenData
 }
 
 func newTestMemoryStore() *testMemoryStore {
 	return &testMemoryStore{
-		sessions:  make(map[string]*Session),
-		authCodes: make(map[string]*AuthCodeData),
+		sessions:     make(map[string]*Session),
+		authCodes:    make(map[string]*AuthCodeData),
+		accessTokens: make(map[string]*AccessTokenData),
 	}
 }
 
@@ -73,13 +75,27 @@ func (s *testMemoryStore) DeleteAuthCode(_ context.Context, code string) error {
 	delete(s.authCodes, code)
 	return nil
 }
-func (s *testMemoryStore) SetAccessToken(_ context.Context, _ string, _ *AccessTokenData, _ time.Duration) error {
+func (s *testMemoryStore) SetAccessToken(_ context.Context, jti string, data *AccessTokenData, _ time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accessTokens[jti] = data
 	return nil
 }
-func (s *testMemoryStore) GetAccessToken(_ context.Context, _ string) (*AccessTokenData, error) {
-	return nil, nil
+func (s *testMemoryStore) GetAccessToken(_ context.Context, jti string) (*AccessTokenData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	data, ok := s.accessTokens[jti]
+	if !ok {
+		return nil, nil
+	}
+	return data, nil
 }
-func (s *testMemoryStore) DeleteAccessToken(_ context.Context, _ string) error { return nil }
+func (s *testMemoryStore) DeleteAccessToken(_ context.Context, jti string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.accessTokens, jti)
+	return nil
+}
 func (s *testMemoryStore) Cleanup(_ context.Context) error                      { return nil }
 func (s *testMemoryStore) Close() error                                         { return nil }
 
