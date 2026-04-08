@@ -107,11 +107,11 @@
 - 📄 詳細: plans/idproxy-m11-browser-auth-flow.md（着手時に生成）
 
 ### M12: Auth 構造体・Wrap()
-- [ ] Auth 構造体、New() 関数
-- [ ] Wrap(next http.Handler) http.Handler
-- [ ] リクエスト判定ロジック（OAuth AS パス → OAuthServer / Bearer → JWT検証 / Cookie → セッション検証 / ブラウザ → リダイレクト / API → 401）
-- [ ] 認証済みユーザー情報のコンテキスト注入
-- [ ] TDD: 各分岐のリクエスト判定テスト
+- [x] Auth 構造体、New() 関数
+- [x] Wrap(next http.Handler) http.Handler
+- [x] リクエスト判定ロジック（OAuth AS パス → OAuthServer / Bearer → JWT検証 / Cookie → セッション検証 / ブラウザ → リダイレクト / API → 401）
+- [x] 認証済みユーザー情報のコンテキスト注入
+- [x] TDD: 各分岐のリクエスト判定テスト
 - 📄 詳細: plans/idproxy-m12-auth-wrap.md（着手時に生成）
 
 ### M13: Bearer Token 検証
