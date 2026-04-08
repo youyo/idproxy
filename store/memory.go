@@ -8,6 +8,8 @@ import (
 	"github.com/youyo/idproxy"
 )
 
+const defaultCleanupInterval = 5 * time.Minute
+
 // コンパイル時にインターフェース実装を保証する。
 var _ idproxy.Store = (*MemoryStore)(nil)
 
@@ -29,14 +31,42 @@ type MemoryStore struct {
 	sessions     map[string]*memoryEntry[idproxy.Session]
 	authCodes    map[string]*memoryEntry[idproxy.AuthCodeData]
 	accessTokens map[string]*memoryEntry[idproxy.AccessTokenData]
+	stopCh       chan struct{}
+	closeOnce    sync.Once
 }
 
-// NewMemoryStore は新しい MemoryStore を生成する。
+// NewMemoryStore は新しい MemoryStore を生成し、バックグラウンドクリーンアップ goroutine を起動する。
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
+	return newMemoryStoreWithInterval(defaultCleanupInterval)
+}
+
+// newMemoryStoreWithInterval は指定した interval でクリーンアップ goroutine を起動する。
+// interval が 0 以下の場合は goroutine を起動しない（テスト用途）。
+func newMemoryStoreWithInterval(interval time.Duration) *MemoryStore {
+	m := &MemoryStore{
 		sessions:     make(map[string]*memoryEntry[idproxy.Session]),
 		authCodes:    make(map[string]*memoryEntry[idproxy.AuthCodeData]),
 		accessTokens: make(map[string]*memoryEntry[idproxy.AccessTokenData]),
+		stopCh:       make(chan struct{}),
+	}
+	if interval > 0 {
+		go m.cleanupLoop(interval)
+	}
+	return m
+}
+
+// cleanupLoop は指定した interval で Cleanup を定期呼び出しする。
+// stopCh がクローズされると終了する。
+func (m *MemoryStore) cleanupLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			_ = m.Cleanup(context.Background())
+		case <-m.stopCh:
+			return
+		}
 	}
 }
 
@@ -191,14 +221,34 @@ func (m *MemoryStore) DeleteAccessToken(ctx context.Context, jti string) error {
 	return nil
 }
 
-// --- M06 スタブ ---
-
-// Cleanup はスタブ実装。M06 で完全実装する。
+// Cleanup は全マップを走査し、期限切れエントリを削除する。
 func (m *MemoryStore) Cleanup(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for k, e := range m.sessions {
+		if e.isExpired() {
+			delete(m.sessions, k)
+		}
+	}
+	for k, e := range m.authCodes {
+		if e.isExpired() {
+			delete(m.authCodes, k)
+		}
+	}
+	for k, e := range m.accessTokens {
+		if e.isExpired() {
+			delete(m.accessTokens, k)
+		}
+	}
 	return nil
 }
 
-// Close はスタブ実装。M06 で完全実装する。
+// Close はバックグラウンドクリーンアップ goroutine を停止する。
+// 二重呼び出しは安全（sync.Once で保護）。
 func (m *MemoryStore) Close() error {
+	m.closeOnce.Do(func() {
+		close(m.stopCh)
+	})
 	return nil
 }

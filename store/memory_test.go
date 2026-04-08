@@ -620,3 +620,160 @@ func TestMemoryStore_Concurrent_AllTypes(t *testing.T) {
 
 	wg.Wait()
 }
+
+// --- Cleanup / Close テスト ---
+
+// newTestMemoryStore はテスト専用コンストラクタ。
+// バックグラウンド goroutine を起動せず、goroutine リークを防止する。
+func newTestMemoryStore() *MemoryStore {
+	return newMemoryStoreWithInterval(0)
+}
+
+func TestMemoryStore_Cleanup_RemovesExpiredSessions(t *testing.T) {
+	ms := newTestMemoryStore()
+	defer ms.Close()
+	ctx := context.Background()
+
+	_ = ms.SetSession(ctx, "expired", testSession(), -time.Second)
+	_ = ms.SetSession(ctx, "valid", testSession(), time.Hour)
+
+	err := ms.Cleanup(ctx)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	got, _ := ms.GetSession(ctx, "expired")
+	if got != nil {
+		t.Error("expired session should be nil after Cleanup")
+	}
+	got, _ = ms.GetSession(ctx, "valid")
+	if got == nil {
+		t.Error("valid session should remain after Cleanup")
+	}
+}
+
+func TestMemoryStore_Cleanup_RemovesExpiredAuthCodes(t *testing.T) {
+	ms := newTestMemoryStore()
+	defer ms.Close()
+	ctx := context.Background()
+
+	_ = ms.SetAuthCode(ctx, "expired-code", testAuthCodeData(), -time.Second)
+	_ = ms.SetAuthCode(ctx, "valid-code", testAuthCodeData(), time.Hour)
+
+	err := ms.Cleanup(ctx)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	got, _ := ms.GetAuthCode(ctx, "expired-code")
+	if got != nil {
+		t.Error("expired auth code should be nil after Cleanup")
+	}
+	got, _ = ms.GetAuthCode(ctx, "valid-code")
+	if got == nil {
+		t.Error("valid auth code should remain after Cleanup")
+	}
+}
+
+func TestMemoryStore_Cleanup_RemovesExpiredAccessTokens(t *testing.T) {
+	ms := newTestMemoryStore()
+	defer ms.Close()
+	ctx := context.Background()
+
+	_ = ms.SetAccessToken(ctx, "expired-jti", testAccessTokenData(), -time.Second)
+	_ = ms.SetAccessToken(ctx, "valid-jti", testAccessTokenData(), time.Hour)
+
+	err := ms.Cleanup(ctx)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	got, _ := ms.GetAccessToken(ctx, "expired-jti")
+	if got != nil {
+		t.Error("expired access token should be nil after Cleanup")
+	}
+	got, _ = ms.GetAccessToken(ctx, "valid-jti")
+	if got == nil {
+		t.Error("valid access token should remain after Cleanup")
+	}
+}
+
+func TestMemoryStore_Cleanup_AllTypes(t *testing.T) {
+	ms := newTestMemoryStore()
+	defer ms.Close()
+	ctx := context.Background()
+
+	// 3マップそれぞれに期限切れ・有効エントリを設定
+	_ = ms.SetSession(ctx, "sess-exp", testSession(), -time.Second)
+	_ = ms.SetSession(ctx, "sess-ok", testSession(), time.Hour)
+	_ = ms.SetAuthCode(ctx, "code-exp", testAuthCodeData(), -time.Second)
+	_ = ms.SetAuthCode(ctx, "code-ok", testAuthCodeData(), time.Hour)
+	_ = ms.SetAccessToken(ctx, "jti-exp", testAccessTokenData(), -time.Second)
+	_ = ms.SetAccessToken(ctx, "jti-ok", testAccessTokenData(), time.Hour)
+
+	err := ms.Cleanup(ctx)
+	if err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	// 期限切れは削除済み
+	s, _ := ms.GetSession(ctx, "sess-exp")
+	if s != nil {
+		t.Error("sess-exp should be deleted")
+	}
+	c, _ := ms.GetAuthCode(ctx, "code-exp")
+	if c != nil {
+		t.Error("code-exp should be deleted")
+	}
+	a, _ := ms.GetAccessToken(ctx, "jti-exp")
+	if a != nil {
+		t.Error("jti-exp should be deleted")
+	}
+
+	// 有効エントリは残存
+	s, _ = ms.GetSession(ctx, "sess-ok")
+	if s == nil {
+		t.Error("sess-ok should remain")
+	}
+	c, _ = ms.GetAuthCode(ctx, "code-ok")
+	if c == nil {
+		t.Error("code-ok should remain")
+	}
+	a, _ = ms.GetAccessToken(ctx, "jti-ok")
+	if a == nil {
+		t.Error("jti-ok should remain")
+	}
+}
+
+func TestMemoryStore_Close_Idempotent(t *testing.T) {
+	ms := NewMemoryStore()
+
+	// 二重 Close がパニックしないこと
+	if err := ms.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := ms.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
+func TestMemoryStore_Cleanup_OnlyValid(t *testing.T) {
+	ms := newTestMemoryStore()
+	defer ms.Close()
+	ctx := context.Background()
+
+	// 有効エントリのみ — Cleanup 後も全て残ること
+	_ = ms.SetSession(ctx, "s1", testSession(), time.Hour)
+	_ = ms.SetSession(ctx, "s2", testSession(), time.Hour)
+
+	if err := ms.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	for _, id := range []string{"s1", "s2"} {
+		got, _ := ms.GetSession(ctx, id)
+		if got == nil {
+			t.Errorf("session %s should remain after Cleanup with no expired entries", id)
+		}
+	}
+}
