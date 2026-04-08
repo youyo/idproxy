@@ -223,3 +223,400 @@ func TestMemoryStore_Concurrent(t *testing.T) {
 
 	wg.Wait()
 }
+
+// --- AuthCode テスト ---
+
+func testAuthCodeData() *idproxy.AuthCodeData {
+	now := time.Now()
+	return &idproxy.AuthCodeData{
+		Code:                "code-abc123",
+		ClientID:            "client-001",
+		RedirectURI:         "https://app.example.com/callback",
+		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid", "profile"},
+		User:                &idproxy.User{Email: "test@example.com", Subject: "sub-001"},
+		CreatedAt:           now,
+		ExpiresAt:           now.Add(10 * time.Minute),
+	}
+}
+
+func TestMemoryStore_SetGetAuthCode(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testAuthCodeData()
+
+	if err := ms.SetAuthCode(ctx, data.Code, data, time.Hour); err != nil {
+		t.Fatalf("SetAuthCode() error = %v", err)
+	}
+
+	got, err := ms.GetAuthCode(ctx, data.Code)
+	if err != nil {
+		t.Fatalf("GetAuthCode() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetAuthCode() returned nil")
+	}
+	if got.Code != data.Code {
+		t.Errorf("Code = %q, want %q", got.Code, data.Code)
+	}
+	if got.ClientID != data.ClientID {
+		t.Errorf("ClientID = %q, want %q", got.ClientID, data.ClientID)
+	}
+	if got.RedirectURI != data.RedirectURI {
+		t.Errorf("RedirectURI = %q, want %q", got.RedirectURI, data.RedirectURI)
+	}
+	if len(got.Scopes) != len(data.Scopes) {
+		t.Errorf("Scopes = %v, want %v", got.Scopes, data.Scopes)
+	}
+	if got.User == nil || got.User.Email != data.User.Email {
+		t.Errorf("User.Email = %v, want %v", got.User, data.User)
+	}
+}
+
+func TestMemoryStore_GetAuthCode_NotFound(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	got, err := ms.GetAuthCode(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetAuthCode() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetAuthCode() = %v, want nil", got)
+	}
+}
+
+func TestMemoryStore_GetAuthCode_Expired(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testAuthCodeData()
+
+	// TTL を 1ns に設定して即時期限切れ
+	if err := ms.SetAuthCode(ctx, data.Code, data, time.Nanosecond); err != nil {
+		t.Fatalf("SetAuthCode() error = %v", err)
+	}
+	// 少し待って確実に期限切れにする
+	time.Sleep(time.Millisecond)
+
+	got, err := ms.GetAuthCode(ctx, data.Code)
+	if err != nil {
+		t.Fatalf("GetAuthCode() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetAuthCode() = %v, want nil (expired)", got)
+	}
+}
+
+func TestMemoryStore_SetAuthCode_Overwrite(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	data1 := testAuthCodeData()
+	data2 := testAuthCodeData()
+	data2.ClientID = "client-updated"
+
+	if err := ms.SetAuthCode(ctx, data1.Code, data1, time.Hour); err != nil {
+		t.Fatalf("SetAuthCode(1) error = %v", err)
+	}
+	if err := ms.SetAuthCode(ctx, data1.Code, data2, time.Hour); err != nil {
+		t.Fatalf("SetAuthCode(2) error = %v", err)
+	}
+
+	got, err := ms.GetAuthCode(ctx, data1.Code)
+	if err != nil {
+		t.Fatalf("GetAuthCode() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetAuthCode() returned nil")
+	}
+	if got.ClientID != "client-updated" {
+		t.Errorf("ClientID = %q, want %q", got.ClientID, "client-updated")
+	}
+}
+
+func TestMemoryStore_DeleteAuthCode(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testAuthCodeData()
+
+	if err := ms.SetAuthCode(ctx, data.Code, data, time.Hour); err != nil {
+		t.Fatalf("SetAuthCode() error = %v", err)
+	}
+	if err := ms.DeleteAuthCode(ctx, data.Code); err != nil {
+		t.Fatalf("DeleteAuthCode() error = %v", err)
+	}
+
+	got, err := ms.GetAuthCode(ctx, data.Code)
+	if err != nil {
+		t.Fatalf("GetAuthCode() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetAuthCode() = %v, want nil (deleted)", got)
+	}
+}
+
+func TestMemoryStore_DeleteAuthCode_NotFound(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	if err := ms.DeleteAuthCode(ctx, "nonexistent"); err != nil {
+		t.Errorf("DeleteAuthCode() error = %v, want nil", err)
+	}
+}
+
+func TestMemoryStore_SetAuthCode_ContextCanceled(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	data := testAuthCodeData()
+
+	err := ms.SetAuthCode(ctx, data.Code, data, time.Hour)
+	if err != context.Canceled {
+		t.Errorf("SetAuthCode() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestMemoryStore_GetAuthCode_ContextCanceled(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := ms.GetAuthCode(ctx, "any")
+	if err != context.Canceled {
+		t.Errorf("GetAuthCode() error = %v, want %v", err, context.Canceled)
+	}
+	if got != nil {
+		t.Errorf("GetAuthCode() = %v, want nil", got)
+	}
+}
+
+func TestMemoryStore_DeleteAuthCode_ContextCanceled(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := ms.DeleteAuthCode(ctx, "any")
+	if err != context.Canceled {
+		t.Errorf("DeleteAuthCode() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+// --- AccessToken テスト ---
+
+func testAccessTokenData() *idproxy.AccessTokenData {
+	now := time.Now()
+	return &idproxy.AccessTokenData{
+		JTI:       "jti-xyz789",
+		Subject:   "sub-001",
+		Email:     "test@example.com",
+		ClientID:  "client-001",
+		Scopes:    []string{"openid", "profile"},
+		IssuedAt:  now,
+		ExpiresAt: now.Add(time.Hour),
+		Revoked:   false,
+	}
+}
+
+func TestMemoryStore_SetGetAccessToken(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testAccessTokenData()
+
+	if err := ms.SetAccessToken(ctx, data.JTI, data, time.Hour); err != nil {
+		t.Fatalf("SetAccessToken() error = %v", err)
+	}
+
+	got, err := ms.GetAccessToken(ctx, data.JTI)
+	if err != nil {
+		t.Fatalf("GetAccessToken() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetAccessToken() returned nil")
+	}
+	if got.JTI != data.JTI {
+		t.Errorf("JTI = %q, want %q", got.JTI, data.JTI)
+	}
+	if got.Subject != data.Subject {
+		t.Errorf("Subject = %q, want %q", got.Subject, data.Subject)
+	}
+	if got.Email != data.Email {
+		t.Errorf("Email = %q, want %q", got.Email, data.Email)
+	}
+	if got.ClientID != data.ClientID {
+		t.Errorf("ClientID = %q, want %q", got.ClientID, data.ClientID)
+	}
+	if len(got.Scopes) != len(data.Scopes) {
+		t.Errorf("Scopes = %v, want %v", got.Scopes, data.Scopes)
+	}
+	if got.Revoked != data.Revoked {
+		t.Errorf("Revoked = %v, want %v", got.Revoked, data.Revoked)
+	}
+}
+
+func TestMemoryStore_GetAccessToken_NotFound(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	got, err := ms.GetAccessToken(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetAccessToken() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetAccessToken() = %v, want nil", got)
+	}
+}
+
+func TestMemoryStore_GetAccessToken_Expired(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testAccessTokenData()
+
+	// TTL を 1ns に設定して即時期限切れ
+	if err := ms.SetAccessToken(ctx, data.JTI, data, time.Nanosecond); err != nil {
+		t.Fatalf("SetAccessToken() error = %v", err)
+	}
+	// 少し待って確実に期限切れにする
+	time.Sleep(time.Millisecond)
+
+	got, err := ms.GetAccessToken(ctx, data.JTI)
+	if err != nil {
+		t.Fatalf("GetAccessToken() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetAccessToken() = %v, want nil (expired)", got)
+	}
+}
+
+func TestMemoryStore_SetAccessToken_Overwrite(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	data1 := testAccessTokenData()
+	data2 := testAccessTokenData()
+	data2.Revoked = true
+
+	if err := ms.SetAccessToken(ctx, data1.JTI, data1, time.Hour); err != nil {
+		t.Fatalf("SetAccessToken(1) error = %v", err)
+	}
+	if err := ms.SetAccessToken(ctx, data1.JTI, data2, time.Hour); err != nil {
+		t.Fatalf("SetAccessToken(2) error = %v", err)
+	}
+
+	got, err := ms.GetAccessToken(ctx, data1.JTI)
+	if err != nil {
+		t.Fatalf("GetAccessToken() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetAccessToken() returned nil")
+	}
+	if !got.Revoked {
+		t.Errorf("Revoked = %v, want true", got.Revoked)
+	}
+}
+
+func TestMemoryStore_DeleteAccessToken(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testAccessTokenData()
+
+	if err := ms.SetAccessToken(ctx, data.JTI, data, time.Hour); err != nil {
+		t.Fatalf("SetAccessToken() error = %v", err)
+	}
+	if err := ms.DeleteAccessToken(ctx, data.JTI); err != nil {
+		t.Fatalf("DeleteAccessToken() error = %v", err)
+	}
+
+	got, err := ms.GetAccessToken(ctx, data.JTI)
+	if err != nil {
+		t.Fatalf("GetAccessToken() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetAccessToken() = %v, want nil (deleted)", got)
+	}
+}
+
+func TestMemoryStore_DeleteAccessToken_NotFound(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	if err := ms.DeleteAccessToken(ctx, "nonexistent"); err != nil {
+		t.Errorf("DeleteAccessToken() error = %v, want nil", err)
+	}
+}
+
+func TestMemoryStore_SetAccessToken_ContextCanceled(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	data := testAccessTokenData()
+
+	err := ms.SetAccessToken(ctx, data.JTI, data, time.Hour)
+	if err != context.Canceled {
+		t.Errorf("SetAccessToken() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestMemoryStore_GetAccessToken_ContextCanceled(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	got, err := ms.GetAccessToken(ctx, "any")
+	if err != context.Canceled {
+		t.Errorf("GetAccessToken() error = %v, want %v", err, context.Canceled)
+	}
+	if got != nil {
+		t.Errorf("GetAccessToken() = %v, want nil", got)
+	}
+}
+
+func TestMemoryStore_DeleteAccessToken_ContextCanceled(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := ms.DeleteAccessToken(ctx, "any")
+	if err != context.Canceled {
+		t.Errorf("DeleteAccessToken() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+// --- 複合並行テスト ---
+
+func TestMemoryStore_Concurrent_AllTypes(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	const goroutines = 50
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 9) // Session + AuthCode + AccessToken × 3操作
+
+	for i := range goroutines {
+		idx := i % 26
+		sessID := "sess-" + string(rune('A'+idx))
+		codeID := "code-" + string(rune('A'+idx))
+		jtiID := "jti-" + string(rune('A'+idx))
+
+		sess := &idproxy.Session{ID: sessID, User: &idproxy.User{Email: sessID + "@example.com"}}
+		authCode := &idproxy.AuthCodeData{Code: codeID, ClientID: "client-" + string(rune('A'+idx))}
+		token := &idproxy.AccessTokenData{JTI: jtiID, Subject: "sub-" + string(rune('A'+idx))}
+
+		// Session
+		go func() { defer wg.Done(); _ = ms.SetSession(ctx, sessID, sess, time.Hour) }()
+		go func() { defer wg.Done(); _, _ = ms.GetSession(ctx, sessID) }()
+		go func() { defer wg.Done(); _ = ms.DeleteSession(ctx, sessID) }()
+
+		// AuthCode
+		go func() { defer wg.Done(); _ = ms.SetAuthCode(ctx, codeID, authCode, time.Hour) }()
+		go func() { defer wg.Done(); _, _ = ms.GetAuthCode(ctx, codeID) }()
+		go func() { defer wg.Done(); _ = ms.DeleteAuthCode(ctx, codeID) }()
+
+		// AccessToken
+		go func() { defer wg.Done(); _ = ms.SetAccessToken(ctx, jtiID, token, time.Hour) }()
+		go func() { defer wg.Done(); _, _ = ms.GetAccessToken(ctx, jtiID) }()
+		go func() { defer wg.Done(); _ = ms.DeleteAccessToken(ctx, jtiID) }()
+	}
+
+	wg.Wait()
+}

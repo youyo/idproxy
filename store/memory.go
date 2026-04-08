@@ -25,14 +25,18 @@ func (e *memoryEntry[T]) isExpired() bool {
 // MemoryStore はインメモリの Store 実装。
 // シングルインスタンス環境とテスト用途に適する。
 type MemoryStore struct {
-	mu       sync.RWMutex
-	sessions map[string]*memoryEntry[idproxy.Session]
+	mu           sync.RWMutex
+	sessions     map[string]*memoryEntry[idproxy.Session]
+	authCodes    map[string]*memoryEntry[idproxy.AuthCodeData]
+	accessTokens map[string]*memoryEntry[idproxy.AccessTokenData]
 }
 
 // NewMemoryStore は新しい MemoryStore を生成する。
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		sessions: make(map[string]*memoryEntry[idproxy.Session]),
+		sessions:     make(map[string]*memoryEntry[idproxy.Session]),
+		authCodes:    make(map[string]*memoryEntry[idproxy.AuthCodeData]),
+		accessTokens: make(map[string]*memoryEntry[idproxy.AccessTokenData]),
 	}
 }
 
@@ -85,37 +89,109 @@ func (m *MemoryStore) DeleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
-// --- 以下は M05/M06 で実装するスタブ ---
+// --- AuthCode CRUD ---
 
-// SetAuthCode はスタブ実装。M05 で完全実装する。
-func (m *MemoryStore) SetAuthCode(_ context.Context, _ string, _ *idproxy.AuthCodeData, _ time.Duration) error {
+// SetAuthCode は認可コードを保存する。同一コードが存在する場合は上書きする。
+func (m *MemoryStore) SetAuthCode(ctx context.Context, code string, data *idproxy.AuthCodeData, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.authCodes[code] = &memoryEntry[idproxy.AuthCodeData]{
+		value:     data,
+		expiresAt: time.Now().Add(ttl),
+	}
 	return nil
 }
 
-// GetAuthCode はスタブ実装。M05 で完全実装する。
-func (m *MemoryStore) GetAuthCode(_ context.Context, _ string) (*idproxy.AuthCodeData, error) {
-	return nil, nil
+// GetAuthCode は認可コードを取得する。
+// 存在しない場合または期限切れの場合は nil, nil を返す。
+func (m *MemoryStore) GetAuthCode(ctx context.Context, code string) (*idproxy.AuthCodeData, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	entry, ok := m.authCodes[code]
+	if !ok {
+		return nil, nil
+	}
+	if entry.isExpired() {
+		return nil, nil
+	}
+	return entry.value, nil
 }
 
-// DeleteAuthCode はスタブ実装。M05 で完全実装する。
-func (m *MemoryStore) DeleteAuthCode(_ context.Context, _ string) error {
+// DeleteAuthCode は認可コードを削除する。存在しない code の削除はエラーにならない（冪等）。
+func (m *MemoryStore) DeleteAuthCode(ctx context.Context, code string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.authCodes, code)
 	return nil
 }
 
-// SetAccessToken はスタブ実装。M05 で完全実装する。
-func (m *MemoryStore) SetAccessToken(_ context.Context, _ string, _ *idproxy.AccessTokenData, _ time.Duration) error {
+// --- AccessToken CRUD ---
+
+// SetAccessToken はアクセストークンを保存する。同一 JTI が存在する場合は上書きする。
+func (m *MemoryStore) SetAccessToken(ctx context.Context, jti string, data *idproxy.AccessTokenData, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.accessTokens[jti] = &memoryEntry[idproxy.AccessTokenData]{
+		value:     data,
+		expiresAt: time.Now().Add(ttl),
+	}
 	return nil
 }
 
-// GetAccessToken はスタブ実装。M05 で完全実装する。
-func (m *MemoryStore) GetAccessToken(_ context.Context, _ string) (*idproxy.AccessTokenData, error) {
-	return nil, nil
+// GetAccessToken はアクセストークンを取得する。
+// 存在しない場合または期限切れの場合は nil, nil を返す。
+func (m *MemoryStore) GetAccessToken(ctx context.Context, jti string) (*idproxy.AccessTokenData, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	entry, ok := m.accessTokens[jti]
+	if !ok {
+		return nil, nil
+	}
+	if entry.isExpired() {
+		return nil, nil
+	}
+	return entry.value, nil
 }
 
-// DeleteAccessToken はスタブ実装。M05 で完全実装する。
-func (m *MemoryStore) DeleteAccessToken(_ context.Context, _ string) error {
+// DeleteAccessToken はアクセストークンを削除する。存在しない JTI の削除はエラーにならない（冪等）。
+func (m *MemoryStore) DeleteAccessToken(ctx context.Context, jti string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.accessTokens, jti)
 	return nil
 }
+
+// --- M06 スタブ ---
 
 // Cleanup はスタブ実装。M06 で完全実装する。
 func (m *MemoryStore) Cleanup(_ context.Context) error {
