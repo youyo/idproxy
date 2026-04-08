@@ -20,9 +20,9 @@
 | 4 | Dynamic Client Registration (RFC 7591) を MVP に含める | Claude Cowork 互換に実用上必須 |
 
 ## Current Focus
-- **マイルストーン**: M02 基本型定義
-- **直近の完了**: M01 プロジェクト初期化
-- **次のアクション**: Config, OIDCProvider, Store インターフェース等の型定義
+- **マイルストーン**: M05 MemoryStore - AuthCode・AccessToken CRUD
+- **直近の完了**: M04 MemoryStore - Session CRUD
+- **次のアクション**: SetAuthCode / GetAuthCode / DeleteAuthCode / SetAccessToken / GetAccessToken / DeleteAccessToken
 
 ## Progress
 
@@ -40,10 +40,10 @@
 - 📄 詳細: plans/idproxy-m02-types.md
 
 ### M03: Config バリデーション
-- [ ] Config.Validate() 実装
-- [ ] デフォルト値適用ロジック
-- [ ] TDD: 正常系・異常系テスト
-- 📄 詳細: plans/idproxy-m03-config-validation.md（着手時に生成）
+- [x] Config.Validate() 実装
+- [x] デフォルト値適用ロジック
+- [x] TDD: 正常系・異常系テスト
+- 📄 詳細: plans/idproxy-m03-config-validation.md
 
 ### M04: MemoryStore - Session CRUD
 - [x] MemoryStore 構造体・コンストラクタ
