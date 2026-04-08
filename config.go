@@ -2,7 +2,10 @@ package idproxy
 
 import (
 	"crypto"
+	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -103,3 +106,83 @@ var DefaultConfig = Config{
 
 // DefaultScopes は OIDCProvider のデフォルトスコープ。
 var DefaultScopes = []string{"openid", "email", "profile"}
+
+// Validate は Config のバリデーションを行い、デフォルト値を適用する。
+// 使用前に必ず呼び出すこと。
+func (c *Config) Validate() error {
+	// デフォルト値適用
+	if c.SessionMaxAge == 0 {
+		c.SessionMaxAge = DefaultConfig.SessionMaxAge
+	}
+	if c.AccessTokenTTL == 0 {
+		c.AccessTokenTTL = DefaultConfig.AccessTokenTTL
+	}
+	if c.AuthCodeTTL == 0 {
+		c.AuthCodeTTL = DefaultConfig.AuthCodeTTL
+	}
+	if c.Logger == nil {
+		c.Logger = slog.Default()
+	}
+
+	// Provider Scopes デフォルト適用（スライスコピーで mutation 防止）
+	for i := range c.Providers {
+		if len(c.Providers[i].Scopes) == 0 {
+			c.Providers[i].Scopes = append([]string{}, DefaultScopes...)
+		}
+	}
+
+	// バリデーション
+	var errs []string
+
+	if len(c.Providers) == 0 {
+		errs = append(errs, "at least one provider is required")
+	}
+	for i, p := range c.Providers {
+		if p.Issuer == "" {
+			errs = append(errs, fmt.Sprintf("providers[%d]: issuer is required", i))
+		}
+		if p.ClientID == "" {
+			errs = append(errs, fmt.Sprintf("providers[%d]: client_id is required", i))
+		}
+		if p.ClientSecret == "" {
+			errs = append(errs, fmt.Sprintf("providers[%d]: client_secret is required", i))
+		}
+	}
+
+	// ExternalURL（必須 + https:// チェック）
+	if c.ExternalURL == "" {
+		errs = append(errs, "external_url is required")
+	} else if !strings.HasPrefix(c.ExternalURL, "https://") {
+		if !isLocalhostURL(c.ExternalURL) {
+			errs = append(errs, "external_url must start with https:// (except http://localhost)")
+		}
+	}
+
+	// CookieSecret
+	if len(c.CookieSecret) < 32 {
+		errs = append(errs, "cookie_secret must be at least 32 bytes")
+	}
+
+	// OAuth
+	if c.OAuth != nil && c.OAuth.SigningKey == nil {
+		errs = append(errs, "oauth.signing_key is required when oauth is configured")
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("config validation failed: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// isLocalhostURL は URL が http://localhost へのアクセスかどうかを判定する。
+func isLocalhostURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
