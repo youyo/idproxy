@@ -87,13 +87,13 @@
 - [x] TDD: Cookie 暗号化・復号テスト、セッション CRUD テスト
 - 📄 詳細: plans/idproxy-m09-session-manager.md
 
-### M10: OIDC プロバイダー管理
-- [ ] ProviderManager 構造体
-- [ ] OIDC Discovery 取得・キャッシュ（go-oidc）
-- [ ] 複数 IdP 初期化・管理
-- [ ] プロバイダー選択ロジック（1つ→直接、複数→選択ページ）
-- [ ] プロバイダー選択 HTML ページ生成
-- [ ] TDD: モック IdP での初期化テスト
+### M10: OIDC プロバイダー管理 ✅
+- [x] ProviderManager 構造体
+- [x] OIDC Discovery 取得・キャッシュ（go-oidc）
+- [x] 複数 IdP 初期化・管理
+- [x] プロバイダー選択ロジック（1つ→直接、複数→選択ページ）
+- [x] プロバイダー選択 HTML ページ生成
+- [x] TDD: モック IdP での初期化テスト
 - 📄 詳細: plans/idproxy-m10-provider-manager.md（着手時に生成）
 
 ### M11: ブラウザ認証フロー
