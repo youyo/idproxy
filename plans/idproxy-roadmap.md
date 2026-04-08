@@ -97,13 +97,13 @@
 - 📄 詳細: plans/idproxy-m10-provider-manager.md（着手時に生成）
 
 ### M11: ブラウザ認証フロー
-- [ ] OIDC Authorization Request 生成（state, nonce）
-- [ ] IdP へのリダイレクト
-- [ ] /callback 処理（認可コード → ID Token 交換）
-- [ ] ID Token 検証（署名、issuer、audience、nonce、expiry）
-- [ ] AllowedDomains / AllowedEmails 認可判定
-- [ ] セッション作成・Cookie 発行・元 URL リダイレクト
-- [ ] TDD: モック IdP を使ったフルフローテスト
+- [x] OIDC Authorization Request 生成（state, nonce）
+- [x] IdP へのリダイレクト
+- [x] /callback 処理（認可コード → ID Token 交換）
+- [x] ID Token 検証（署名、issuer、audience、nonce、expiry）
+- [x] AllowedDomains / AllowedEmails 認可判定
+- [x] セッション作成・Cookie 発行・元 URL リダイレクト
+- [x] TDD: モック IdP を使ったフルフローテスト
 - 📄 詳細: plans/idproxy-m11-browser-auth-flow.md（着手時に生成）
 
 ### M12: Auth 構造体・Wrap()

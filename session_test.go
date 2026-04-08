@@ -13,15 +13,19 @@ import (
 
 // --- テスト用インメモリ Store ---
 
-// testMemoryStore は session_test.go 専用のシンプルな Store 実装。
+// testMemoryStore はテスト専用のシンプルな Store 実装。
 // store.MemoryStore は循環インポートになるため使用できない。
 type testMemoryStore struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
+	mu        sync.RWMutex
+	sessions  map[string]*Session
+	authCodes map[string]*AuthCodeData
 }
 
 func newTestMemoryStore() *testMemoryStore {
-	return &testMemoryStore{sessions: make(map[string]*Session)}
+	return &testMemoryStore{
+		sessions:  make(map[string]*Session),
+		authCodes: make(map[string]*AuthCodeData),
+	}
 }
 
 func (s *testMemoryStore) SetSession(_ context.Context, id string, session *Session, _ time.Duration) error {
@@ -48,13 +52,27 @@ func (s *testMemoryStore) DeleteSession(_ context.Context, id string) error {
 	return nil
 }
 
-func (s *testMemoryStore) SetAuthCode(_ context.Context, _ string, _ *AuthCodeData, _ time.Duration) error {
+func (s *testMemoryStore) SetAuthCode(_ context.Context, code string, data *AuthCodeData, _ time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authCodes[code] = data
 	return nil
 }
-func (s *testMemoryStore) GetAuthCode(_ context.Context, _ string) (*AuthCodeData, error) {
-	return nil, nil
+func (s *testMemoryStore) GetAuthCode(_ context.Context, code string) (*AuthCodeData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	data, ok := s.authCodes[code]
+	if !ok {
+		return nil, nil
+	}
+	return data, nil
 }
-func (s *testMemoryStore) DeleteAuthCode(_ context.Context, _ string) error { return nil }
+func (s *testMemoryStore) DeleteAuthCode(_ context.Context, code string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.authCodes, code)
+	return nil
+}
 func (s *testMemoryStore) SetAccessToken(_ context.Context, _ string, _ *AccessTokenData, _ time.Duration) error {
 	return nil
 }
