@@ -1511,3 +1511,385 @@ func TestToken_WithPathPrefix(t *testing.T) {
 		t.Errorf("expected token_type Bearer, got %v", resp["token_type"])
 	}
 }
+
+// --- Register (Dynamic Client Registration: RFC 7591) テスト ---
+
+func TestRegister_Success(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	reqBody := map[string]any{
+		"redirect_uris": []string{"https://app.example.com/callback"},
+		"client_name":   "My App",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// client_id が生成されている
+	clientID, ok := resp["client_id"].(string)
+	if !ok || clientID == "" {
+		t.Error("expected non-empty client_id")
+	}
+
+	// client_name が返却されている
+	if resp["client_name"] != "My App" {
+		t.Errorf("expected client_name 'My App', got %v", resp["client_name"])
+	}
+
+	// redirect_uris が返却されている
+	uris, ok := resp["redirect_uris"].([]any)
+	if !ok || len(uris) != 1 || uris[0] != "https://app.example.com/callback" {
+		t.Errorf("unexpected redirect_uris: %v", resp["redirect_uris"])
+	}
+
+	// デフォルト値が設定されている
+	if resp["token_endpoint_auth_method"] != "none" {
+		t.Errorf("expected token_endpoint_auth_method 'none', got %v", resp["token_endpoint_auth_method"])
+	}
+
+	grantTypes, ok := resp["grant_types"].([]any)
+	if !ok || len(grantTypes) != 1 || grantTypes[0] != "authorization_code" {
+		t.Errorf("unexpected grant_types: %v", resp["grant_types"])
+	}
+
+	responseTypes, ok := resp["response_types"].([]any)
+	if !ok || len(responseTypes) != 1 || responseTypes[0] != "code" {
+		t.Errorf("unexpected response_types: %v", resp["response_types"])
+	}
+}
+
+func TestRegister_StoresPersistsClient(t *testing.T) {
+	st := newTestMemoryStore()
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{Issuer: "https://accounts.google.com", ClientID: "x", ClientSecret: "y"},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: []byte("test-cookie-secret-32-bytes-long!"),
+		Store:        st,
+		OAuth:        &OAuthConfig{SigningKey: privateKey},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate() failed: %v", err)
+	}
+
+	srv, err := NewOAuthServer(cfg, st, nil)
+	if err != nil {
+		t.Fatalf("NewOAuthServer() failed: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"redirect_uris": []string{"https://app.example.com/callback"},
+		"client_name":   "Stored App",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	clientID := resp["client_id"].(string)
+
+	// Store から取得できることを確認
+	stored, err := st.GetClient(context.Background(), clientID)
+	if err != nil {
+		t.Fatalf("GetClient error: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("expected client to be stored, got nil")
+	}
+	if stored.ClientName != "Stored App" {
+		t.Errorf("expected client_name 'Stored App', got %q", stored.ClientName)
+	}
+	if len(stored.RedirectURIs) != 1 || stored.RedirectURIs[0] != "https://app.example.com/callback" {
+		t.Errorf("unexpected redirect_uris: %v", stored.RedirectURIs)
+	}
+}
+
+func TestRegister_MethodNotAllowed(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/register", nil)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestRegister_WrongContentType(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestRegister_MissingRedirectURIs(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	reqBody := map[string]any{
+		"client_name": "No URIs",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_EmptyRedirectURIs(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	reqBody := map[string]any{
+		"redirect_uris": []string{},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_InvalidRedirectURI(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	reqBody := map[string]any{
+		"redirect_uris": []string{"not a valid uri"},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_InvalidJSON(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader("{invalid"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_WithPathPrefix(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "/auth")
+
+	reqBody := map[string]any{
+		"redirect_uris": []string{"https://app.example.com/callback"},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_MultipleRedirectURIs(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	reqBody := map[string]any{
+		"redirect_uris": []string{
+			"https://app.example.com/callback",
+			"https://app.example.com/callback2",
+		},
+		"client_name": "Multi URI App",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	uris, ok := resp["redirect_uris"].([]any)
+	if !ok || len(uris) != 2 {
+		t.Errorf("expected 2 redirect_uris, got %v", resp["redirect_uris"])
+	}
+}
+
+func TestRegister_WithScope(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	reqBody := map[string]any{
+		"redirect_uris": []string{"https://app.example.com/callback"},
+		"scope":         "openid email profile",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp["scope"] != "openid email profile" {
+		t.Errorf("expected scope 'openid email profile', got %v", resp["scope"])
+	}
+}
+
+// TestAuthorize_DynamicClient は動的登録クライアントが /authorize を利用できることを確認する。
+func TestAuthorize_DynamicClient(t *testing.T) {
+	st := newTestMemoryStore()
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{Issuer: "https://accounts.google.com", ClientID: "x", ClientSecret: "y"},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: []byte("test-cookie-secret-32-bytes-long!"),
+		Store:        st,
+		OAuth:        &OAuthConfig{SigningKey: privateKey},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate() failed: %v", err)
+	}
+
+	sm, err := NewSessionManager(cfg)
+	if err != nil {
+		t.Fatalf("NewSessionManager: %v", err)
+	}
+
+	srv, err := NewOAuthServer(cfg, st, sm)
+	if err != nil {
+		t.Fatalf("NewOAuthServer() failed: %v", err)
+	}
+
+	// 1. まず /register でクライアントを登録
+	registerBody := map[string]any{
+		"redirect_uris": []string{"https://app.example.com/callback"},
+		"client_name":   "Dynamic Client",
+	}
+	body, _ := json.Marshal(registerBody)
+
+	regReq := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	regReq.Header.Set("Content-Type", "application/json")
+	regW := httptest.NewRecorder()
+	srv.ServeHTTP(regW, regReq)
+
+	if regW.Code != http.StatusCreated {
+		t.Fatalf("register expected 201, got %d", regW.Code)
+	}
+
+	var regResp map[string]any
+	_ = json.NewDecoder(regW.Body).Decode(&regResp)
+	dynamicClientID := regResp["client_id"].(string)
+
+	// 2. セッションを作成してログイン状態にする
+	sessionCookies := issueTestSession(t, sm)
+
+	// 3. /authorize に動的クライアント ID でアクセス
+	authorizeURL := "/authorize?response_type=code&client_id=" + dynamicClientID +
+		"&redirect_uri=" + url.QueryEscape("https://app.example.com/callback") +
+		"&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM" +
+		"&code_challenge_method=S256&state=test-state&scope=openid"
+
+	authReq := httptest.NewRequest(http.MethodGet, authorizeURL, nil)
+	for _, c := range sessionCookies {
+		authReq.AddCookie(c)
+	}
+	authW := httptest.NewRecorder()
+	srv.ServeHTTP(authW, authReq)
+
+	// 認証済みなので 302 リダイレクトが期待される
+	if authW.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d: %s", authW.Code, authW.Body.String())
+	}
+
+	loc := authW.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://app.example.com/callback") {
+		t.Errorf("expected redirect to app callback, got %s", loc)
+	}
+}

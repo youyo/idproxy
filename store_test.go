@@ -48,6 +48,18 @@ func (m *mockStore) DeleteAccessToken(_ context.Context, _ string) error {
 	return nil
 }
 
+func (m *mockStore) SetClient(_ context.Context, _ string, _ *ClientData) error {
+	return nil
+}
+
+func (m *mockStore) GetClient(_ context.Context, _ string) (*ClientData, error) {
+	return nil, nil
+}
+
+func (m *mockStore) DeleteClient(_ context.Context, _ string) error {
+	return nil
+}
+
 func (m *mockStore) Cleanup(_ context.Context) error {
 	return nil
 }

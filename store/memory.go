@@ -31,6 +31,7 @@ type MemoryStore struct {
 	sessions     map[string]*memoryEntry[idproxy.Session]
 	authCodes    map[string]*memoryEntry[idproxy.AuthCodeData]
 	accessTokens map[string]*memoryEntry[idproxy.AccessTokenData]
+	clients      map[string]*idproxy.ClientData
 	stopCh       chan struct{}
 	closeOnce    sync.Once
 }
@@ -47,6 +48,7 @@ func newMemoryStoreWithInterval(interval time.Duration) *MemoryStore {
 		sessions:     make(map[string]*memoryEntry[idproxy.Session]),
 		authCodes:    make(map[string]*memoryEntry[idproxy.AuthCodeData]),
 		accessTokens: make(map[string]*memoryEntry[idproxy.AccessTokenData]),
+		clients:      make(map[string]*idproxy.ClientData),
 		stopCh:       make(chan struct{}),
 	}
 	if interval > 0 {
@@ -218,6 +220,52 @@ func (m *MemoryStore) DeleteAccessToken(ctx context.Context, jti string) error {
 	defer m.mu.Unlock()
 
 	delete(m.accessTokens, jti)
+	return nil
+}
+
+// --- Client CRUD ---
+
+// SetClient はクライアントを保存する。同一 clientID が存在する場合は上書きする。
+// クライアントは TTL なし（明示的に削除されるまで永続）。
+func (m *MemoryStore) SetClient(ctx context.Context, clientID string, data *idproxy.ClientData) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.clients[clientID] = data
+	return nil
+}
+
+// GetClient はクライアントを取得する。
+// 存在しない場合は nil, nil を返す。
+func (m *MemoryStore) GetClient(ctx context.Context, clientID string) (*idproxy.ClientData, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	data, ok := m.clients[clientID]
+	if !ok {
+		return nil, nil
+	}
+	return data, nil
+}
+
+// DeleteClient はクライアントを削除する。存在しない clientID の削除はエラーにならない（冪等）。
+func (m *MemoryStore) DeleteClient(ctx context.Context, clientID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.clients, clientID)
 	return nil
 }
 

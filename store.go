@@ -22,6 +22,11 @@ type Store interface {
 	GetAccessToken(ctx context.Context, jti string) (*AccessTokenData, error)
 	DeleteAccessToken(ctx context.Context, jti string) error
 
+	// クライアント操作（Dynamic Client Registration: RFC 7591）
+	SetClient(ctx context.Context, clientID string, data *ClientData) error
+	GetClient(ctx context.Context, clientID string) (*ClientData, error)
+	DeleteClient(ctx context.Context, clientID string) error
+
 	// クリーンアップ
 	Cleanup(ctx context.Context) error
 	Close() error
@@ -110,4 +115,31 @@ type AccessTokenData struct {
 
 	// Revoked はトークンがリボケーション済みかどうか。
 	Revoked bool
+}
+
+// ClientData は動的登録されたクライアントの情報を保持する（RFC 7591）。
+type ClientData struct {
+	// ClientID は自動生成されたクライアント識別子（UUID v4）。
+	ClientID string `json:"client_id"`
+
+	// ClientName はクライアントの表示名。
+	ClientName string `json:"client_name,omitempty"`
+
+	// RedirectURIs は許可されたリダイレクト URI のリスト。
+	RedirectURIs []string `json:"redirect_uris"`
+
+	// GrantTypes は許可された grant_type（デフォルト: ["authorization_code"]）。
+	GrantTypes []string `json:"grant_types"`
+
+	// ResponseTypes は許可された response_type（デフォルト: ["code"]）。
+	ResponseTypes []string `json:"response_types"`
+
+	// TokenEndpointAuthMethod はトークンエンドポイントの認証方式（デフォルト: "none"）。
+	TokenEndpointAuthMethod string `json:"token_endpoint_auth_method"`
+
+	// Scope はスペース区切りのスコープ文字列。
+	Scope string `json:"scope,omitempty"`
+
+	// CreatedAt はクライアント登録日時。
+	CreatedAt time.Time `json:"created_at"`
 }

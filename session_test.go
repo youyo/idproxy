@@ -20,6 +20,7 @@ type testMemoryStore struct {
 	sessions     map[string]*Session
 	authCodes    map[string]*AuthCodeData
 	accessTokens map[string]*AccessTokenData
+	clients      map[string]*ClientData
 }
 
 func newTestMemoryStore() *testMemoryStore {
@@ -27,6 +28,7 @@ func newTestMemoryStore() *testMemoryStore {
 		sessions:     make(map[string]*Session),
 		authCodes:    make(map[string]*AuthCodeData),
 		accessTokens: make(map[string]*AccessTokenData),
+		clients:      make(map[string]*ClientData),
 	}
 }
 
@@ -96,8 +98,29 @@ func (s *testMemoryStore) DeleteAccessToken(_ context.Context, jti string) error
 	delete(s.accessTokens, jti)
 	return nil
 }
-func (s *testMemoryStore) Cleanup(_ context.Context) error                      { return nil }
-func (s *testMemoryStore) Close() error                                         { return nil }
+func (s *testMemoryStore) SetClient(_ context.Context, clientID string, data *ClientData) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clients[clientID] = data
+	return nil
+}
+func (s *testMemoryStore) GetClient(_ context.Context, clientID string) (*ClientData, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	data, ok := s.clients[clientID]
+	if !ok {
+		return nil, nil
+	}
+	return data, nil
+}
+func (s *testMemoryStore) DeleteClient(_ context.Context, clientID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.clients, clientID)
+	return nil
+}
+func (s *testMemoryStore) Cleanup(_ context.Context) error { return nil }
+func (s *testMemoryStore) Close() error                    { return nil }
 
 // --- ヘルパー関数 ---
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 // OAuthServer は OAuth 2.1 Authorization Server エンドポイントを提供する。
@@ -82,6 +83,8 @@ func (s *OAuthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.authorizeHandler(w, r)
 	case prefix + "/token":
 		s.tokenHandler(w, r)
+	case prefix + "/register":
+		s.registerHandler(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -193,12 +196,6 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		s.authorizeError(w, "invalid_request", "client_id is required", http.StatusBadRequest)
 		return
 	}
-	if s.config.OAuth != nil && s.config.OAuth.ClientID != "" {
-		if clientID != s.config.OAuth.ClientID {
-			s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
-			return
-		}
-	}
 
 	// redirect_uri 検証
 	redirectURI := q.Get("redirect_uri")
@@ -206,7 +203,50 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		s.authorizeError(w, "invalid_request", "redirect_uri is required", http.StatusBadRequest)
 		return
 	}
-	if !s.isAllowedRedirectURI(redirectURI) {
+
+	// client_id の検証: 静的設定 → 動的登録クライアント → デフォルト許可
+	var dynamicClient *ClientData
+	if s.config.OAuth != nil && s.config.OAuth.ClientID != "" {
+		// 静的クライアント ID が設定されている場合
+		if clientID != s.config.OAuth.ClientID {
+			// 動的登録クライアントも確認
+			client, err := s.store.GetClient(r.Context(), clientID)
+			if err != nil {
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			if client == nil {
+				s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
+				return
+			}
+			dynamicClient = client
+		}
+	} else {
+		// 静的クライアント ID 未設定: 動的登録クライアントを確認
+		client, err := s.store.GetClient(r.Context(), clientID)
+		if err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if client != nil {
+			dynamicClient = client
+		}
+	}
+
+	// redirect_uri 検証: 動的登録クライアントの場合は登録済み URI と照合
+	if dynamicClient != nil {
+		uriAllowed := false
+		for _, u := range dynamicClient.RedirectURIs {
+			if u == redirectURI {
+				uriAllowed = true
+				break
+			}
+		}
+		if !uriAllowed {
+			s.authorizeError(w, "invalid_request", "redirect_uri is not allowed", http.StatusBadRequest)
+			return
+		}
+	} else if !s.isAllowedRedirectURI(redirectURI) {
 		s.authorizeError(w, "invalid_request", "redirect_uri is not allowed", http.StatusBadRequest)
 		return
 	}
@@ -524,6 +564,105 @@ func (s *OAuthServer) isAllowedRedirectURI(uri string) bool {
 	}
 	host := parsed.Hostname()
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// registerHandler は POST /register を処理する。
+// RFC 7591 Dynamic Client Registration に準拠し、クライアントを動的に登録する。
+//
+//  1. Content-Type: application/json を検証
+//  2. リクエスト JSON をパース（redirect_uris 必須、client_name オプション）
+//  3. redirect_uris のバリデーション（各 URI が有効か）
+//  4. client_id を UUID で自動生成
+//  5. Store.SetClient で保存
+//  6. 201 Created でクライアント情報を返却
+func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Content-Type 検証
+	ct := r.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		s.registerError(w, "invalid_request", "Content-Type must be application/json", http.StatusBadRequest)
+		return
+	}
+
+	// リクエスト JSON パース
+	var req struct {
+		RedirectURIs []string `json:"redirect_uris"`
+		ClientName   string   `json:"client_name"`
+		Scope        string   `json:"scope"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.registerError(w, "invalid_request", "failed to parse JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// redirect_uris 必須・非空
+	if len(req.RedirectURIs) == 0 {
+		s.registerError(w, "invalid_request", "redirect_uris is required and must not be empty", http.StatusBadRequest)
+		return
+	}
+
+	// redirect_uris バリデーション
+	for _, uri := range req.RedirectURIs {
+		parsed, err := url.Parse(uri)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			s.registerError(w, "invalid_request", fmt.Sprintf("invalid redirect_uri: %s", uri), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// client_id を UUID で自動生成
+	clientID := uuid.New().String()
+	now := time.Now()
+
+	clientData := &ClientData{
+		ClientID:                clientID,
+		ClientName:              req.ClientName,
+		RedirectURIs:            req.RedirectURIs,
+		GrantTypes:              []string{"authorization_code"},
+		ResponseTypes:           []string{"code"},
+		TokenEndpointAuthMethod: "none",
+		Scope:                   req.Scope,
+		CreatedAt:               now,
+	}
+
+	// Store に保存
+	if err := s.store.SetClient(r.Context(), clientID, clientData); err != nil {
+		s.registerError(w, "server_error", "failed to store client", http.StatusInternalServerError)
+		return
+	}
+
+	// レスポンス JSON（RFC 7591 準拠）
+	resp := map[string]any{
+		"client_id":                  clientData.ClientID,
+		"redirect_uris":             clientData.RedirectURIs,
+		"grant_types":               clientData.GrantTypes,
+		"response_types":            clientData.ResponseTypes,
+		"token_endpoint_auth_method": clientData.TokenEndpointAuthMethod,
+	}
+	if clientData.ClientName != "" {
+		resp["client_name"] = clientData.ClientName
+	}
+	if clientData.Scope != "" {
+		resp["scope"] = clientData.Scope
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// registerError は /register エンドポイントの error レスポンスを JSON で返す。
+func (s *OAuthServer) registerError(w http.ResponseWriter, errorCode, description string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":             errorCode,
+		"error_description": description,
+	})
 }
 
 // redirectToLogin は未認証ユーザーをログインページにリダイレクトする。

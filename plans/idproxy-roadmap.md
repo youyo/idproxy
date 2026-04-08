@@ -148,12 +148,12 @@
 - [x] TDD: トークン発行・PKCE検証・二重使用テスト
 - 📄 詳細: plans/idproxy-m16-oauth-token.md（着手時に生成）
 
-### M17: Dynamic Client Registration
-- [ ] POST /register エンドポイント（RFC 7591）
-- [ ] client_id 自動生成
-- [ ] redirect_uris, client_name 等の登録
-- [ ] クライアント情報の Store 保存
-- [ ] TDD: 登録・取得テスト
+### M17: Dynamic Client Registration ✅
+- [x] POST /register エンドポイント（RFC 7591）
+- [x] client_id 自動生成
+- [x] redirect_uris, client_name 等の登録
+- [x] クライアント情報の Store 保存
+- [x] TDD: 登録・取得テスト
 - 📄 詳細: plans/idproxy-m17-dcr.md（着手時に生成）
 
 ### M18: スタンドアロンプロキシ・SSE パススルー
