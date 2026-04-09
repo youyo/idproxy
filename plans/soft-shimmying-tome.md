@@ -1,10 +1,60 @@
-# Plan: README英語化 + CLI help修正 + MCP E2Eテストサーバー
+# Plan: README に OIDC プロバイダー設定ガイドのリンクを追加
 
 ## Context
 
-idproxy は公開 OSS プロジェクトだが、README・コードコメント・CLI 出力がすべて日本語。国際的な利用を想定し英語を基本言語にする。また CLI の `-h` フラグが環境変数未設定時にエラーで終了する問題を修正し、E2E テスト用の小さな MCP サーバーを追加する。
+idproxy は Google や Entra ID などの OIDC プロバイダーを使うが、README にプロバイダー側の設定方法への参照がない。初めて使うユーザーが Client ID / Client Secret の取得方法を迷わないよう、公式ドキュメントへのリンクを追加する。
 
 ---
+
+## 変更内容
+
+README.md と README_ja.md の環境変数テーブルの後に「Provider Setup」セクションを追加。
+
+### 対象ファイル
+- `README.md` — 英語版に Provider Setup セクション追加
+- `README_ja.md` — 日本語版にプロバイダー設定セクション追加
+
+### README.md に追加する内容 (Optional テーブルの後)
+
+```markdown
+## Provider Setup
+
+| Provider | Issuer URL | Setup Guide |
+|----------|-----------|-------------|
+| Google | `https://accounts.google.com` | [OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect) |
+| Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [Register an application](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app) |
+
+When configuring your OIDC provider, add the following redirect URI:
+
+    {EXTERNAL_URL}/auth/callback
+```
+
+### README_ja.md に追加する内容 (オプションテーブルの後)
+
+```markdown
+## プロバイダー設定
+
+| プロバイダー | Issuer URL | 設定ガイド |
+|-------------|-----------|-----------|
+| Google | `https://accounts.google.com` | [OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect) |
+| Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [アプリの登録](https://learn.microsoft.com/ja-jp/entra/identity-platform/quickstart-register-app) |
+
+OIDC プロバイダー側でリダイレクト URI を以下のように設定してください：
+
+    {EXTERNAL_URL}/auth/callback
+```
+
+### ポイント
+- Entra ID の日本語版 README では Microsoft Learn の日本語 URL (`/ja-jp/`) を使用
+- リダイレクト URI のヒントを入れることで、プロバイダー設定時の最もよくあるミスを防ぐ
+
+### 検証
+- 目視確認: リンクが有効か、テーブルのフォーマットが正しいか
+- 既存テストへの影響なし
+
+---
+
+## (以下は前回のプランの残骸 — 実装済み)
 
 ## Task 1: コードコメント英語化 (main.go / config.go)
 
