@@ -92,6 +92,19 @@ services:
 | `PATH_PREFIX` | OAuth 2.1 AS エンドポイントのパスプレフィックス | なし |
 | `PORT` | リッスンポート | `8080` |
 
+## プロバイダー設定
+
+| プロバイダー | `OIDC_ISSUER` | 設定ガイド |
+|-------------|--------------|-----------|
+| Google | `https://accounts.google.com` | [OpenID Connect — Google Identity](https://developers.google.com/identity/openid-connect/openid-connect) |
+| Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [アプリケーションの登録 — Microsoft ID プラットフォーム](https://learn.microsoft.com/ja-jp/entra/identity-platform/quickstart-register-app) |
+
+OIDC プロバイダーへ idproxy をクライアントとして登録する際は、リダイレクト URI を以下のように設定してください：
+
+```
+{EXTERNAL_URL}/auth/callback
+```
+
 ## ライブラリとしての使い方
 
 idproxy は Go ライブラリとしても利用できます。

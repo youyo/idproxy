@@ -92,6 +92,19 @@ services:
 | `PATH_PREFIX` | OAuth 2.1 AS endpoint path prefix | none |
 | `PORT` | Listen port | `8080` |
 
+## Provider Setup
+
+| Provider | `OIDC_ISSUER` | Setup Guide |
+|----------|--------------|-------------|
+| Google | `https://accounts.google.com` | [OpenID Connect — Google Identity](https://developers.google.com/identity/openid-connect/openid-connect) |
+| Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [Register an application — Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app) |
+
+When registering idproxy as a client in your OIDC provider, set the redirect URI to:
+
+```
+{EXTERNAL_URL}/auth/callback
+```
+
 ## Library Usage
 
 idproxy can also be used as a Go library.
