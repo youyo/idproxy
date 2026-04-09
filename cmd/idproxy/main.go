@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,6 +24,9 @@ func main() {
 }
 
 func run() error {
+	flag.Usage = printUsage
+	flag.Parse()
+
 	cfg, upstream, listenAddr, err := parseConfig()
 	if err != nil {
 		return err
@@ -31,20 +35,20 @@ func run() error {
 	logger := slog.Default()
 	cfg.Logger = logger
 
-	// Auth の初期化
+	// Initialize Auth
 	ctx := context.Background()
 	auth, err := idproxy.New(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize auth: %w", err)
 	}
 
-	// リバースプロキシの設定
+	// Configure reverse proxy
 	proxy, err := newReverseProxy(upstream)
 	if err != nil {
 		return fmt.Errorf("failed to create reverse proxy: %w", err)
 	}
 
-	// ルーティング
+	// Set up routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthzHandler)
 	mux.Handle("/", auth.Wrap(proxy))
@@ -54,7 +58,7 @@ func run() error {
 		Handler: mux,
 	}
 
-	// グレースフルシャットダウン
+	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -74,8 +78,8 @@ func run() error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-// newReverseProxy は upstream URL へのリバースプロキシを構築する。
-// FlushInterval: -1 で SSE ストリーミングをパススルーする。
+// newReverseProxy creates a reverse proxy to the upstream URL.
+// FlushInterval: -1 enables SSE streaming passthrough.
 func newReverseProxy(upstream string) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(upstream)
 	if err != nil {
@@ -83,12 +87,12 @@ func newReverseProxy(upstream string) (*httputil.ReverseProxy, error) {
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.FlushInterval = -1 // SSE ストリーミング対応: レスポンスを即座にフラッシュ
+	proxy.FlushInterval = -1 // SSE streaming: flush responses immediately
 
 	return proxy, nil
 }
 
-// healthzHandler はヘルスチェックエンドポイント。
+// healthzHandler is the health check endpoint.
 func healthzHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)

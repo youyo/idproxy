@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -10,25 +11,25 @@ import (
 	"github.com/youyo/idproxy/store"
 )
 
-// parseConfig は環境変数から Config、upstream URL、listenAddr を構築する。
-// 必須環境変数が不足している場合はエラーを返す。
+// parseConfig builds Config, upstream URL, and listenAddr from environment variables.
+// Returns an error if required environment variables are missing.
 func parseConfig() (idproxy.Config, string, string, error) {
 	var cfg idproxy.Config
 	var errs []string
 
-	// UPSTREAM_URL（必須）
+	// UPSTREAM_URL (required)
 	upstream := os.Getenv("UPSTREAM_URL")
 	if upstream == "" {
 		errs = append(errs, "UPSTREAM_URL is required")
 	}
 
-	// EXTERNAL_URL（必須）
+	// EXTERNAL_URL (required)
 	cfg.ExternalURL = os.Getenv("EXTERNAL_URL")
 	if cfg.ExternalURL == "" {
 		errs = append(errs, "EXTERNAL_URL is required")
 	}
 
-	// COOKIE_SECRET（必須、hex エンコードされた 32 バイト以上）
+	// COOKIE_SECRET (required, hex-encoded 32+ bytes)
 	cookieSecretHex := os.Getenv("COOKIE_SECRET")
 	if cookieSecretHex == "" {
 		errs = append(errs, "COOKIE_SECRET is required")
@@ -41,22 +42,22 @@ func parseConfig() (idproxy.Config, string, string, error) {
 		}
 	}
 
-	// OIDC_ISSUER（必須）
+	// OIDC_ISSUER (required)
 	oidcIssuer := os.Getenv("OIDC_ISSUER")
 	if oidcIssuer == "" {
 		errs = append(errs, "OIDC_ISSUER is required")
 	}
 
-	// OIDC_CLIENT_ID（必須）
+	// OIDC_CLIENT_ID (required)
 	oidcClientID := os.Getenv("OIDC_CLIENT_ID")
 	if oidcIssuer != "" && oidcClientID == "" {
 		errs = append(errs, "OIDC_CLIENT_ID is required")
 	}
 
-	// OIDC_CLIENT_SECRET（オプション、ただしプロバイダーが設定される場合は必要）
+	// OIDC_CLIENT_SECRET (optional)
 	oidcClientSecret := os.Getenv("OIDC_CLIENT_SECRET")
 
-	// プロバイダー構築
+	// Build providers
 	if oidcIssuer != "" && oidcClientID != "" {
 		issuers := splitTrim(oidcIssuer)
 		clientIDs := splitTrim(oidcClientID)
@@ -84,33 +85,33 @@ func parseConfig() (idproxy.Config, string, string, error) {
 		}
 	}
 
-	// PATH_PREFIX（オプション）
+	// PATH_PREFIX (optional)
 	cfg.PathPrefix = os.Getenv("PATH_PREFIX")
 
-	// ALLOWED_DOMAINS（オプション、カンマ区切り）
+	// ALLOWED_DOMAINS (optional, comma-separated)
 	if v := os.Getenv("ALLOWED_DOMAINS"); v != "" {
 		cfg.AllowedDomains = splitTrim(v)
 	}
 
-	// ALLOWED_EMAILS（オプション、カンマ区切り）
+	// ALLOWED_EMAILS (optional, comma-separated)
 	if v := os.Getenv("ALLOWED_EMAILS"); v != "" {
 		cfg.AllowedEmails = splitTrim(v)
 	}
 
-	// PORT（デフォルト: 8080）
+	// PORT (default: 8080)
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 	listenAddr := ":" + port
 
-	// Store（デフォルト: MemoryStore）
+	// Store (default: MemoryStore)
 	cfg.Store = store.NewMemoryStore()
 
-	// OAUTH_CLIENT_ID / OAUTH_ALLOWED_REDIRECT_URIS（オプション）
-	// 注: JWT_SIGNING_KEY_FILE がない場合は OAuth AS は有効化しない
-	// ここでは OAuthConfig の ClientID と AllowedRedirectURIs のみ保持
-	// SigningKey は JWT_SIGNING_KEY_FILE から読み込む処理が必要だが M18 スコープ外
+	// OAUTH_CLIENT_ID / OAUTH_ALLOWED_REDIRECT_URIS (optional)
+	// Note: OAuth AS is not enabled without JWT_SIGNING_KEY_FILE
+	// Only ClientID and AllowedRedirectURIs are stored here
+	// SigningKey must be loaded from JWT_SIGNING_KEY_FILE (M18 scope)
 
 	if len(errs) > 0 {
 		return idproxy.Config{}, "", "", fmt.Errorf("config error: %s", strings.Join(errs, "; "))
@@ -119,8 +120,8 @@ func parseConfig() (idproxy.Config, string, string, error) {
 	return cfg, upstream, listenAddr, nil
 }
 
-// splitTrim はカンマ区切り文字列を分割し、各要素の前後の空白を除去する。
-// 空文字列の場合は空スライスを返す。
+// splitTrim splits a comma-separated string and trims whitespace from each element.
+// Returns nil for an empty string.
 func splitTrim(s string) []string {
 	if s == "" {
 		return nil
@@ -134,4 +135,26 @@ func splitTrim(s string) []string {
 		}
 	}
 	return result
+}
+
+// printUsage prints the usage message for the idproxy command.
+func printUsage() {
+	w := flag.CommandLine.Output()
+	fmt.Fprintf(w, "Usage: idproxy\n\n")
+	fmt.Fprintf(w, "OIDC authentication reverse proxy and MCP OAuth 2.1 Authorization Server.\n\n")
+	fmt.Fprintf(w, "Environment Variables:\n\n")
+	fmt.Fprintf(w, "  Required:\n")
+	fmt.Fprintf(w, "    UPSTREAM_URL          Backend URL to proxy to (e.g. http://localhost:3000)\n")
+	fmt.Fprintf(w, "    EXTERNAL_URL          External URL of this service (e.g. https://proxy.example.com)\n")
+	fmt.Fprintf(w, "    COOKIE_SECRET         Cookie encryption key, hex-encoded 32+ bytes\n")
+	fmt.Fprintf(w, "                          Generate with: openssl rand -hex 32\n")
+	fmt.Fprintf(w, "    OIDC_ISSUER           OIDC Issuer URL (comma-separated for multiple providers)\n")
+	fmt.Fprintf(w, "    OIDC_CLIENT_ID        OAuth Client ID (comma-separated for multiple providers)\n\n")
+	fmt.Fprintf(w, "  Optional:\n")
+	fmt.Fprintf(w, "    OIDC_CLIENT_SECRET    OAuth Client Secret (comma-separated for multiple providers)\n")
+	fmt.Fprintf(w, "    OIDC_PROVIDER_NAME    Provider display name (comma-separated for multiple providers)\n")
+	fmt.Fprintf(w, "    ALLOWED_DOMAINS       Allowed email domains (comma-separated)\n")
+	fmt.Fprintf(w, "    ALLOWED_EMAILS        Allowed email addresses (comma-separated)\n")
+	fmt.Fprintf(w, "    PATH_PREFIX           OAuth 2.1 AS endpoint path prefix\n")
+	fmt.Fprintf(w, "    PORT                  Listen port (default: 8080)\n")
 }

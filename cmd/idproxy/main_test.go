@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +55,7 @@ func TestNewReverseProxy_InvalidURL(t *testing.T) {
 }
 
 func TestSSEPassthrough(t *testing.T) {
-	// SSE を送信するモックアップストリームサーバー
+	// Mock upstream server sending SSE events
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -64,7 +67,7 @@ func TestSSEPassthrough(t *testing.T) {
 			return
 		}
 
-		// 3 つの SSE イベントを送信
+		// Send 3 SSE events
 		for i := 0; i < 3; i++ {
 			_, _ = fmt.Fprintf(w, "data: event-%d\n\n", i)
 			flusher.Flush()
@@ -72,7 +75,7 @@ func TestSSEPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	// リバースプロキシを構築（FlushInterval:-1）
+	// Create reverse proxy with FlushInterval:-1
 	target, err := url.Parse(upstream.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -80,11 +83,11 @@ func TestSSEPassthrough(t *testing.T) {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1
 
-	// プロキシサーバーを構築
+	// Create proxy server
 	proxyServer := httptest.NewServer(proxy)
 	defer proxyServer.Close()
 
-	// SSE リクエストを送信
+	// Send SSE request
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(proxyServer.URL + "/events")
 	if err != nil {
@@ -99,7 +102,7 @@ func TestSSEPassthrough(t *testing.T) {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
 	}
 
-	// SSE イベントを読み取り
+	// Read SSE events
 	scanner := bufio.NewScanner(resp.Body)
 	var events []string
 	for scanner.Scan() {
@@ -121,7 +124,7 @@ func TestSSEPassthrough(t *testing.T) {
 }
 
 func TestSSEPassthrough_StreamingTiming(t *testing.T) {
-	// SSE イベントが即座にフラッシュされることを確認するテスト
+	// Test that SSE events are flushed immediately
 	eventCh := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -133,14 +136,14 @@ func TestSSEPassthrough_StreamingTiming(t *testing.T) {
 			return
 		}
 
-		// 最初のイベントを送信
+		// Send first event
 		_, _ = fmt.Fprintf(w, "data: first\n\n")
 		flusher.Flush()
 
-		// クライアントが最初のイベントを受信するまで待機
+		// Wait for client to receive first event
 		<-eventCh
 
-		// 2番目のイベントを送信
+		// Send second event
 		_, _ = fmt.Fprintf(w, "data: second\n\n")
 		flusher.Flush()
 	}))
@@ -162,7 +165,7 @@ func TestSSEPassthrough_StreamingTiming(t *testing.T) {
 
 	scanner := bufio.NewScanner(resp.Body)
 
-	// 最初のイベントが即座に到着することを確認
+	// Verify first event arrives immediately
 	start := time.Now()
 	var firstEvent string
 	for scanner.Scan() {
@@ -177,15 +180,15 @@ func TestSSEPassthrough_StreamingTiming(t *testing.T) {
 	if firstEvent != "data: first" {
 		t.Errorf("first event = %q, want %q", firstEvent, "data: first")
 	}
-	// FlushInterval:-1 なら即座にフラッシュされるはず（100ms 以内）
+	// FlushInterval:-1 should flush immediately (< 500ms)
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("first event took %v, expected < 500ms (FlushInterval should be -1)", elapsed)
 	}
 
-	// upstream に続行を許可
+	// Allow upstream to continue
 	close(eventCh)
 
-	// 2番目のイベント到着確認
+	// Verify second event arrives
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {
@@ -196,4 +199,17 @@ func TestSSEPassthrough_StreamingTiming(t *testing.T) {
 		}
 	}
 	t.Fatal("second event not received")
+}
+
+func TestPrintUsage(t *testing.T) {
+	var buf bytes.Buffer
+	flag.CommandLine.SetOutput(&buf)
+	defer flag.CommandLine.SetOutput(os.Stderr)
+	printUsage()
+	output := buf.String()
+	for _, want := range []string{"UPSTREAM_URL", "EXTERNAL_URL", "COOKIE_SECRET", "OIDC_ISSUER", "OIDC_CLIENT_ID", "Environment Variables"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("expected %q in usage output", want)
+		}
+	}
 }

@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseConfig_AllRequired(t *testing.T) {
-	// 必須環境変数が全て設定されている場合
+	// All required environment variables are set
 	secret := hex.EncodeToString(make([]byte, 32))
 	setEnvs(t, map[string]string{
 		"UPSTREAM_URL":       "http://localhost:3000",
@@ -243,8 +243,8 @@ func TestParseConfig_OAuthFields(t *testing.T) {
 	}
 }
 
-// setEnvs はテスト用に環境変数を設定し、テスト終了時にクリーンアップする。
-// 既知の全環境変数を先にクリアしてからセットする。
+// setEnvs sets environment variables for testing and cleans them up after the test.
+// Clears all known environment variables before setting new ones.
 func setEnvs(t *testing.T, envs map[string]string) {
 	t.Helper()
 	allKeys := []string{
