@@ -200,11 +200,7 @@ func (a *Auth) isOAuthASPath(path string) bool {
 
 	// /.well-known/ プレフィックスのパス
 	wellKnownPrefix := prefix + "/.well-known/"
-	if strings.HasPrefix(path, wellKnownPrefix) {
-		return true
-	}
-
-	return false
+	return strings.HasPrefix(path, wellKnownPrefix)
 }
 
 // handleUnauthenticated は未認証リクエストに対して

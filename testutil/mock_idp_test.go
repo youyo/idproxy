@@ -127,7 +127,7 @@ func TestMockIdP_AuthFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("token request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -179,7 +179,7 @@ func TestMockIdP_Authorize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authorize request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("expected 302, got %d", resp.StatusCode)
@@ -222,7 +222,7 @@ func TestMockIdP_InvalidCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("token request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid code, got %d", resp.StatusCode)
@@ -248,7 +248,7 @@ func TestMockIdP_CodeOneTimeUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first token request failed: %v", err)
 	}
-	resp1.Body.Close()
+	_ = resp1.Body.Close()
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("first token request: expected 200, got %d", resp1.StatusCode)
 	}
@@ -258,7 +258,7 @@ func TestMockIdP_CodeOneTimeUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second token request failed: %v", err)
 	}
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 	if resp2.StatusCode != http.StatusBadRequest {
 		t.Fatalf("second token request: expected 400 (code already used), got %d", resp2.StatusCode)
 	}

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -128,6 +127,12 @@ func (s *OAuthServer) jwksHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pub := s.privateKey.PublicKey
+	ecdhPub, err := pub.ECDH()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	pubBytes := ecdhPub.Bytes() // 0x04 || X (32bytes) || Y (32bytes)
 
 	jwks := map[string]any{
 		"keys": []map[string]any{
@@ -135,8 +140,8 @@ func (s *OAuthServer) jwksHandler(w http.ResponseWriter, r *http.Request) {
 				"kty": "EC",
 				"kid": s.keyID,
 				"crv": "P-256",
-				"x":   base64.RawURLEncoding.EncodeToString(padTo32Bytes(pub.X)),
-				"y":   base64.RawURLEncoding.EncodeToString(padTo32Bytes(pub.Y)),
+				"x":   base64.RawURLEncoding.EncodeToString(pubBytes[1:33]),
+				"y":   base64.RawURLEncoding.EncodeToString(pubBytes[33:65]),
 				"use": "sig",
 				"alg": "ES256",
 			},
@@ -151,21 +156,15 @@ func (s *OAuthServer) jwksHandler(w http.ResponseWriter, r *http.Request) {
 // computeKeyID は ECDSA 公開鍵から SHA-256 サムプリントベースの kid を生成する。
 func computeKeyID(pub *ecdsa.PublicKey) string {
 	// JWK Thumbprint (RFC 7638) の簡易版: x||y の SHA-256
-	xBytes := padTo32Bytes(pub.X)
-	yBytes := padTo32Bytes(pub.Y)
+	ecdhPub, err := pub.ECDH()
+	if err != nil {
+		return ""
+	}
+	pubBytes := ecdhPub.Bytes() // 0x04 || X (32bytes) || Y (32bytes)
 	h := sha256.New()
-	h.Write(xBytes)
-	h.Write(yBytes)
+	h.Write(pubBytes[1:33])
+	h.Write(pubBytes[33:65])
 	return base64.RawURLEncoding.EncodeToString(h.Sum(nil)[:8])
-}
-
-// padTo32Bytes は big.Int を 32バイト固定長にゼロパディングする。
-// P-256 の座標エンコードに使用する。
-func padTo32Bytes(n *big.Int) []byte {
-	b := n.Bytes()
-	padded := make([]byte, 32)
-	copy(padded[32-len(b):], b)
-	return padded
 }
 
 // authorizeHandler は GET /authorize を処理する。

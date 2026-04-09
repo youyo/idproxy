@@ -48,7 +48,7 @@ func TestConfigStructFields(t *testing.T) {
 	}
 
 	// Store フィールドの型確認（nil 許容）
-	var s Store = cfg.Store
+	s := cfg.Store
 	_ = s
 }
 
@@ -82,10 +82,10 @@ func TestOAuthConfigStructFields(t *testing.T) {
 	cfg := OAuthConfig{}
 
 	// SigningKey は crypto.Signer 型
-	var _ crypto.Signer = cfg.SigningKey
+	var _ crypto.Signer = cfg.SigningKey //nolint:staticcheck
 
 	// SigningMethod は jwt.SigningMethod 型
-	var _ jwt.SigningMethod = cfg.SigningMethod
+	var _ jwt.SigningMethod = cfg.SigningMethod //nolint:staticcheck
 }
 
 func TestDefaultConfigValues(t *testing.T) {
