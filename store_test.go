@@ -69,10 +69,7 @@ func (m *mockStore) Close() error {
 }
 
 func TestMockStoreImplementsStore(t *testing.T) {
-	var s Store = &mockStore{}
-	if s == nil {
-		t.Fatal("mockStore should implement Store interface")
-	}
+	var _ Store = &mockStore{}
 }
 
 func TestSessionStructFields(t *testing.T) {

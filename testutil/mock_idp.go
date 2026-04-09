@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -151,14 +150,20 @@ func (m *MockIdP) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 // P-256 座標は 32バイト固定長にゼロパディングして base64url エンコードする。
 func (m *MockIdP) handleJWKS(w http.ResponseWriter, r *http.Request) {
 	pub := m.privateKey.PublicKey
+	ecdhPub, err := pub.ECDH()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	pubBytes := ecdhPub.Bytes() // 0x04 || X (32bytes) || Y (32bytes)
 	jwks := map[string]any{
 		"keys": []map[string]any{
 			{
 				"kty": "EC",
 				"kid": m.keyID,
 				"crv": "P-256",
-				"x":   base64.RawURLEncoding.EncodeToString(padTo32(pub.X)),
-				"y":   base64.RawURLEncoding.EncodeToString(padTo32(pub.Y)),
+				"x":   base64.RawURLEncoding.EncodeToString(pubBytes[1:33]),
+				"y":   base64.RawURLEncoding.EncodeToString(pubBytes[33:65]),
 				"use": "sig",
 				"alg": "ES256",
 			},
@@ -265,14 +270,6 @@ func (m *MockIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// padTo32 は big.Int の Bytes() 出力を 32バイト固定長にゼロパディングして返す。
-// P-256 の座標エンコードに使用する。
-func padTo32(n *big.Int) []byte {
-	b := n.Bytes()
-	padded := make([]byte, 32)
-	copy(padded[32-len(b):], b)
-	return padded
-}
 
 // writeJSON は JSON レスポンスを書き込むヘルパー。
 func writeJSON(w http.ResponseWriter, status int, v any) {

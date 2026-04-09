@@ -90,7 +90,7 @@ func TestSSEPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET error: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -158,7 +158,7 @@ func TestSSEPassthrough_StreamingTiming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET error: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	scanner := bufio.NewScanner(resp.Body)
 
