@@ -1,21 +1,21 @@
-**English** | [日本語](README_ja.md)
+[English](README.md) | **日本語**
 
 # idproxy
 
-OIDC authentication reverse proxy + MCP OAuth 2.1 Authorization Server.
+OIDC 認証リバースプロキシ + MCP OAuth 2.1 Authorization Server。
 
-idproxy sits in front of any HTTP backend and transparently provides OIDC browser authentication and OAuth 2.1 Bearer Token validation. It also acts as an OAuth 2.1 Authorization Server to protect MCP (Model Context Protocol) servers, with support for Dynamic Client Registration (RFC 7591).
+idproxy は任意の HTTP バックエンドの前段に配置し、OIDC によるブラウザ認証と OAuth 2.1 Bearer Token 検証を透過的に提供します。MCP (Model Context Protocol) サーバーを保護する OAuth 2.1 AS としても動作し、Dynamic Client Registration (RFC 7591) をサポートします。
 
-## Features
+## 特徴
 
-- OIDC-based browser authentication (Google, Microsoft Entra ID, etc.)
-- OAuth 2.1 Authorization Server (PKCE required, Bearer Token issuance)
+- OIDC ベースのブラウザ認証（Google, Microsoft Entra ID 等）
+- OAuth 2.1 Authorization Server（PKCE 必須、Bearer Token 発行）
 - Dynamic Client Registration (RFC 7591)
-- SSE (Server-Sent Events) transparent proxy
-- Optimized for protecting MCP servers
-- Zero-dependency in-memory session store (replaceable for production)
+- SSE (Server-Sent Events) 透過プロキシ
+- MCP サーバー保護に最適化
+- ゼロ依存のインメモリセッションストア（本番用に差し替え可能）
 
-## Installation
+## インストール
 
 ### Go
 
@@ -29,9 +29,9 @@ go install github.com/youyo/idproxy/cmd/idproxy@latest
 docker pull ghcr.io/youyo/idproxy:latest
 ```
 
-## Quick Start
+## クイックスタート
 
-### Configure and run
+### 環境変数を設定して起動
 
 ```bash
 export UPSTREAM_URL=http://localhost:3000
@@ -69,34 +69,34 @@ services:
       - "3000"
 ```
 
-## Environment Variables
+## 環境変数
 
-### Required
+### 必須
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `UPSTREAM_URL` | Backend URL to proxy to | `http://localhost:3000` |
-| `EXTERNAL_URL` | External URL of this service | `https://mcp-auth.example.com` |
-| `COOKIE_SECRET` | Cookie encryption key (hex-encoded, 32+ bytes) | Generate with `openssl rand -hex 32` |
-| `OIDC_ISSUER` | OIDC Issuer URL (comma-separated for multiple) | `https://accounts.google.com` |
-| `OIDC_CLIENT_ID` | OAuth Client ID (comma-separated for multiple) | `your-client-id` |
+| 変数名 | 説明 | 例 |
+|--------|------|-----|
+| `UPSTREAM_URL` | プロキシ先のバックエンド URL | `http://localhost:3000` |
+| `EXTERNAL_URL` | このサービスの外部公開 URL | `https://mcp-auth.example.com` |
+| `COOKIE_SECRET` | Cookie 暗号化キー（hex エンコード、32 バイト以上） | `openssl rand -hex 32` で生成 |
+| `OIDC_ISSUER` | OIDC Issuer URL（カンマ区切りで複数指定可） | `https://accounts.google.com` |
+| `OIDC_CLIENT_ID` | OAuth Client ID（カンマ区切りで複数指定可） | `your-client-id` |
 
-### Optional
+### オプション
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OIDC_CLIENT_SECRET` | OAuth Client Secret (comma-separated for multiple) | none |
-| `OIDC_PROVIDER_NAME` | Provider display name (comma-separated for multiple) | Auto-generated from Issuer |
-| `ALLOWED_DOMAINS` | Allowed email domains (comma-separated) | no restriction |
-| `ALLOWED_EMAILS` | Allowed email addresses (comma-separated) | no restriction |
-| `PATH_PREFIX` | OAuth 2.1 AS endpoint path prefix | none |
-| `PORT` | Listen port | `8080` |
+| 変数名 | 説明 | デフォルト |
+|--------|------|----------|
+| `OIDC_CLIENT_SECRET` | OAuth Client Secret（カンマ区切りで複数指定可） | なし |
+| `OIDC_PROVIDER_NAME` | プロバイダー表示名（カンマ区切りで複数指定可） | Issuer から自動生成 |
+| `ALLOWED_DOMAINS` | 許可メールドメイン（カンマ区切り） | 制限なし |
+| `ALLOWED_EMAILS` | 許可メールアドレス（カンマ区切り） | 制限なし |
+| `PATH_PREFIX` | OAuth 2.1 AS エンドポイントのパスプレフィックス | なし |
+| `PORT` | リッスンポート | `8080` |
 
-## Library Usage
+## ライブラリとしての使い方
 
-idproxy can also be used as a Go library.
+idproxy は Go ライブラリとしても利用できます。
 
-### Basic Reverse Proxy
+### 基本的なリバースプロキシ
 
 ```go
 package main
@@ -139,9 +139,9 @@ func main() {
 }
 ```
 
-### MCP Server Protection (OAuth 2.1 AS)
+### MCP サーバー保護（OAuth 2.1 AS）
 
-Setting `Config.OAuth` enables automatic OAuthServer initialization in `Auth.New()`.
+`Config.OAuth` を設定すると、`Auth.New()` が OAuthServer を自動で構築します。
 
 ```go
 package main
@@ -161,8 +161,6 @@ import (
 )
 
 func main() {
-	// Generate ECDSA P-256 key for JWT signing
-	// Use a persisted key in production
 	signingKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 
 	cfg := idproxy.Config{
@@ -181,7 +179,7 @@ func main() {
 		},
 	}
 
-	// OAuthServer is automatically initialized when Config.OAuth is set
+	// OAuth 設定があれば OAuthServer も自動初期化される
 	auth, err := idproxy.New(context.Background(), cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -195,6 +193,6 @@ func main() {
 }
 ```
 
-## License
+## ライセンス
 
 [MIT License](LICENSE)
