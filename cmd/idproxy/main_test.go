@@ -66,7 +66,7 @@ func TestSSEPassthrough(t *testing.T) {
 
 		// 3 つの SSE イベントを送信
 		for i := 0; i < 3; i++ {
-			fmt.Fprintf(w, "data: event-%d\n\n", i)
+			_, _ = fmt.Fprintf(w, "data: event-%d\n\n", i)
 			flusher.Flush()
 		}
 	}))
@@ -134,14 +134,14 @@ func TestSSEPassthrough_StreamingTiming(t *testing.T) {
 		}
 
 		// 最初のイベントを送信
-		fmt.Fprintf(w, "data: first\n\n")
+		_, _ = fmt.Fprintf(w, "data: first\n\n")
 		flusher.Flush()
 
 		// クライアントが最初のイベントを受信するまで待機
 		<-eventCh
 
 		// 2番目のイベントを送信
-		fmt.Fprintf(w, "data: second\n\n")
+		_, _ = fmt.Fprintf(w, "data: second\n\n")
 		flusher.Flush()
 	}))
 	defer upstream.Close()

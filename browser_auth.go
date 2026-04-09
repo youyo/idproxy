@@ -307,7 +307,7 @@ func (ba *BrowserAuth) SelectionHandler() http.Handler {
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, ba.pm.SelectionHTML())
+		_, _ = fmt.Fprint(w, ba.pm.SelectionHTML())
 	})
 }
 

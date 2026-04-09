@@ -19,7 +19,7 @@ func TestMockIdP_Discovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discovery request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -67,7 +67,7 @@ func TestMockIdP_JWKS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JWKS request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)

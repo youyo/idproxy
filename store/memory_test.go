@@ -631,7 +631,7 @@ func newTestMemoryStore() *MemoryStore {
 
 func TestMemoryStore_Cleanup_RemovesExpiredSessions(t *testing.T) {
 	ms := newTestMemoryStore()
-	defer ms.Close()
+	defer ms.Close() //nolint:errcheck
 	ctx := context.Background()
 
 	_ = ms.SetSession(ctx, "expired", testSession(), -time.Second)
@@ -654,7 +654,7 @@ func TestMemoryStore_Cleanup_RemovesExpiredSessions(t *testing.T) {
 
 func TestMemoryStore_Cleanup_RemovesExpiredAuthCodes(t *testing.T) {
 	ms := newTestMemoryStore()
-	defer ms.Close()
+	defer ms.Close() //nolint:errcheck
 	ctx := context.Background()
 
 	_ = ms.SetAuthCode(ctx, "expired-code", testAuthCodeData(), -time.Second)
@@ -677,7 +677,7 @@ func TestMemoryStore_Cleanup_RemovesExpiredAuthCodes(t *testing.T) {
 
 func TestMemoryStore_Cleanup_RemovesExpiredAccessTokens(t *testing.T) {
 	ms := newTestMemoryStore()
-	defer ms.Close()
+	defer ms.Close() //nolint:errcheck
 	ctx := context.Background()
 
 	_ = ms.SetAccessToken(ctx, "expired-jti", testAccessTokenData(), -time.Second)
@@ -700,7 +700,7 @@ func TestMemoryStore_Cleanup_RemovesExpiredAccessTokens(t *testing.T) {
 
 func TestMemoryStore_Cleanup_AllTypes(t *testing.T) {
 	ms := newTestMemoryStore()
-	defer ms.Close()
+	defer ms.Close() //nolint:errcheck
 	ctx := context.Background()
 
 	// 3マップそれぞれに期限切れ・有効エントリを設定
@@ -759,7 +759,7 @@ func TestMemoryStore_Close_Idempotent(t *testing.T) {
 
 func TestMemoryStore_Cleanup_OnlyValid(t *testing.T) {
 	ms := newTestMemoryStore()
-	defer ms.Close()
+	defer ms.Close() //nolint:errcheck
 	ctx := context.Background()
 
 	// 有効エントリのみ — Cleanup 後も全て残ること

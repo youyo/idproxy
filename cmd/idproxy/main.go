@@ -92,5 +92,5 @@ func newReverseProxy(upstream string) (*httputil.ReverseProxy, error) {
 func healthzHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "ok")
+	_, _ = fmt.Fprint(w, "ok")
 }
