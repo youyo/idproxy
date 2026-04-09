@@ -14,10 +14,12 @@ builds:
       - arm64
 
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
 
 checksum:
   name_template: checksums.txt
@@ -29,3 +31,18 @@ changelog:
       - '^docs:'
       - '^test:'
       - Merge pull request
+
+brews:
+  - name: idproxy
+    repository:
+      owner: youyo
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/youyo/idproxy"
+    description: "idproxy - Identity-aware reverse proxy with OAuth 2.1"
+    license: "MIT"
+    install: |
+      bin.install "idproxy"
+    test: |
+      system "#{bin}/idproxy", "--help"
