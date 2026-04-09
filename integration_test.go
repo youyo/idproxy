@@ -3,6 +3,7 @@
 package idproxy_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -946,5 +947,402 @@ func TestIntegration_InvalidBearerToken(t *testing.T) {
 	}
 	if !strings.Contains(wwwAuth, "Bearer") {
 		t.Fatalf("expected WWW-Authenticate to contain 'Bearer', got %s", wwwAuth)
+	}
+}
+
+// --- E2E 7: MCP OAuth フルフロー ---
+
+func TestIntegration_MCPOAuthFullFlow(t *testing.T) {
+	mockMCP := testutil.NewMockMCP(t)
+	mockIdP := testutil.NewMockIdP(t)
+
+	// MockMCP を upstream とする Auth サーバーを構築
+	// setupAuthWithSSEUpstream と同じパターンで SSE プロキシを構成
+	memStore := store.NewMemoryStore()
+	t.Cleanup(func() { _ = memStore.Close() })
+
+	signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate signing key: %v", err)
+	}
+
+	cfg := idproxy.Config{
+		Providers: []idproxy.OIDCProvider{
+			{
+				Issuer:       mockIdP.Issuer(),
+				ClientID:     "test-client",
+				ClientSecret: "test-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:0",
+		CookieSecret: cookieSecret,
+		Store:        memStore,
+		OAuth: &idproxy.OAuthConfig{
+			SigningKey:          signingKey,
+			AllowedRedirectURIs: []string{},
+		},
+	}
+
+	dummyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	authSrv := httptest.NewServer(dummyHandler)
+
+	cfg.ExternalURL = authSrv.URL
+	cfg.OAuth.AllowedRedirectURIs = []string{
+		authSrv.URL + "/callback",
+		"http://localhost:9999/callback",
+	}
+
+	ctx := context.Background()
+	auth, err := idproxy.New(ctx, cfg)
+	if err != nil {
+		authSrv.Close()
+		t.Fatalf("failed to create auth: %v", err)
+	}
+
+	// MockMCP へのリバースプロキシ（SSE ストリーミング対応）
+	mcpTarget := mockMCP.URL()
+	mcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, mcpTarget+r.URL.Path+"?"+r.URL.RawQuery, r.Body)
+		if err != nil {
+			http.Error(w, "proxy error", http.StatusBadGateway)
+			return
+		}
+		proxyReq.Header = r.Header.Clone()
+
+		resp, err := http.DefaultClient.Do(proxyReq)
+		if err != nil {
+			http.Error(w, "proxy error", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		for k, vv := range resp.Header {
+			for _, v := range vv {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+
+		flusher, ok := w.(http.Flusher)
+		buf := make([]byte, 1024)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				_, _ = w.Write(buf[:n])
+				if ok {
+					flusher.Flush()
+				}
+			}
+			if readErr != nil {
+				break
+			}
+		}
+	})
+
+	authSrv.Config.Handler = auth.Wrap(mcpHandler)
+	defer authSrv.Close()
+
+	client := newNoRedirectClient()
+
+	// Step 1: GET /.well-known/oauth-authorization-server
+	resp, err := client.Get(authSrv.URL + "/.well-known/oauth-authorization-server")
+	if err != nil {
+		t.Fatalf("failed GET metadata: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for metadata, got %d", resp.StatusCode)
+	}
+
+	var metadata map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		t.Fatalf("failed to decode metadata: %v", err)
+	}
+	if metadata["issuer"] != cfg.ExternalURL {
+		t.Fatalf("expected issuer=%s, got %v", cfg.ExternalURL, metadata["issuer"])
+	}
+
+	// Step 2: POST /register (DCR)
+	dcrBody := `{"redirect_uris": ["http://localhost:9999/callback"], "client_name": "mcp-test"}`
+	resp, err = client.Post(authSrv.URL+"/register", "application/json", strings.NewReader(dcrBody))
+	if err != nil {
+		t.Fatalf("failed POST /register: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 201 for /register, got %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var dcrResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err != nil {
+		t.Fatalf("failed to decode DCR response: %v", err)
+	}
+	clientID, ok := dcrResp["client_id"].(string)
+	if !ok || clientID == "" {
+		t.Fatal("expected client_id in DCR response")
+	}
+
+	// Step 3: ブラウザ認証でセッション Cookie 取得
+	cookies := performBrowserLogin(t, authSrv, mockIdP)
+
+	// Step 4: GET /authorize (PKCE)
+	codeVerifier := "test-code-verifier-that-is-long-enough-for-pkce-validation"
+	codeChallenge := idproxy.S256Challenge(codeVerifier)
+
+	authorizeURL := fmt.Sprintf(
+		"%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256&state=mcp-state&scope=openid+email",
+		authSrv.URL,
+		clientID,
+		url.QueryEscape("http://localhost:9999/callback"),
+		codeChallenge,
+	)
+
+	req, _ := http.NewRequest("GET", authorizeURL, nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("failed GET /authorize: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("expected 302 from /authorize, got %d", resp.StatusCode)
+	}
+
+	redirectLocation := resp.Header.Get("Location")
+	parsedRedirect, err := url.Parse(redirectLocation)
+	if err != nil {
+		t.Fatalf("failed to parse redirect location: %v", err)
+	}
+
+	authCode := parsedRedirect.Query().Get("code")
+	if authCode == "" {
+		t.Fatal("expected code in redirect from /authorize")
+	}
+
+	// Step 5: POST /token
+	tokenForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {authCode},
+		"redirect_uri":  {"http://localhost:9999/callback"},
+		"client_id":     {clientID},
+		"code_verifier": {codeVerifier},
+	}
+
+	resp, err = client.PostForm(authSrv.URL+"/token", tokenForm)
+	if err != nil {
+		t.Fatalf("failed POST /token: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 for /token, got %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var tokenResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		t.Fatalf("failed to decode token response: %v", err)
+	}
+
+	accessToken, ok := tokenResp["access_token"].(string)
+	if !ok || accessToken == "" {
+		t.Fatal("expected access_token in token response")
+	}
+
+	// Step 6: GET /sse with Bearer token — SSE 接続してエンドポイント情報を取得
+	sseCtx, sseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer sseCancel()
+
+	sseReq, _ := http.NewRequestWithContext(sseCtx, "GET", authSrv.URL+"/sse", nil)
+	sseReq.Header.Set("Authorization", "Bearer "+accessToken)
+
+	sseResp, err := http.DefaultClient.Do(sseReq)
+	if err != nil {
+		t.Fatalf("failed SSE request: %v", err)
+	}
+	defer sseResp.Body.Close()
+
+	if sseResp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(sseResp.Body)
+		t.Fatalf("expected 200 for SSE, got %d: %s", sseResp.StatusCode, string(bodyBytes))
+	}
+
+	ct := sseResp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected Content-Type=text/event-stream, got %s", ct)
+	}
+
+	// SSE ストリームから endpoint イベントを読み取り
+	scanner := newSSEScanner(sseResp.Body)
+	endpointEvent := readNextSSEEvent(t, scanner)
+	if endpointEvent.event != "endpoint" {
+		t.Fatalf("expected event=endpoint, got %s", endpointEvent.event)
+	}
+	if !strings.Contains(endpointEvent.data, "/message?session_id=") {
+		t.Fatalf("expected endpoint data to contain /message?session_id=, got %s", endpointEvent.data)
+	}
+
+	// メッセージ URL を構築（Auth サーバー経由）
+	messageURL := authSrv.URL + endpointEvent.data
+
+	// Step 7: POST /message — initialize
+	postMCPMessage(t, messageURL, accessToken, 1, "initialize", map[string]any{})
+
+	initEvent := readNextSSEEvent(t, scanner)
+	if initEvent.event != "message" {
+		t.Fatalf("expected event=message for initialize response, got %s", initEvent.event)
+	}
+
+	var initResp map[string]any
+	if err := json.Unmarshal([]byte(initEvent.data), &initResp); err != nil {
+		t.Fatalf("failed to unmarshal initialize response: %v", err)
+	}
+
+	initResult, ok := initResp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result in initialize response, got %v", initResp)
+	}
+	if initResult["protocolVersion"] != "2024-11-05" {
+		t.Fatalf("expected protocolVersion=2024-11-05, got %v", initResult["protocolVersion"])
+	}
+
+	// Step 8: POST /message — tools/list
+	postMCPMessage(t, messageURL, accessToken, 2, "tools/list", nil)
+
+	toolsEvent := readNextSSEEvent(t, scanner)
+	var toolsResp map[string]any
+	if err := json.Unmarshal([]byte(toolsEvent.data), &toolsResp); err != nil {
+		t.Fatalf("failed to unmarshal tools/list response: %v", err)
+	}
+
+	toolsResult, ok := toolsResp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result in tools/list response, got %v", toolsResp)
+	}
+	tools, ok := toolsResult["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		t.Fatal("expected non-empty tools array")
+	}
+	firstTool, ok := tools[0].(map[string]any)
+	if !ok || firstTool["name"] != "echo" {
+		t.Fatalf("expected echo tool, got %v", tools[0])
+	}
+
+	// Step 9: POST /message — tools/call echo
+	postMCPMessage(t, messageURL, accessToken, 3, "tools/call", map[string]any{
+		"name":      "echo",
+		"arguments": map[string]any{"message": "test"},
+	})
+
+	callEvent := readNextSSEEvent(t, scanner)
+	var callResp map[string]any
+	if err := json.Unmarshal([]byte(callEvent.data), &callResp); err != nil {
+		t.Fatalf("failed to unmarshal tools/call response: %v", err)
+	}
+
+	callResult, ok := callResp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result in tools/call response, got %v", callResp)
+	}
+	content, ok := callResult["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatal("expected non-empty content array")
+	}
+	item, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected content item, got %v", content[0])
+	}
+	if item["text"] != "echo: test" {
+		t.Fatalf("expected 'echo: test', got %v", item["text"])
+	}
+
+	// MockMCP のツール呼び出し記録を確認
+	calls := mockMCP.ToolCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call recorded, got %d", len(calls))
+	}
+	if calls[0].Name != "echo" {
+		t.Fatalf("expected tool call name=echo, got %s", calls[0].Name)
+	}
+}
+
+// sseEventData は SSE イベントのイベント名とデータを保持する。
+type sseEventData struct {
+	event string
+	data  string
+}
+
+// newSSEScanner は io.Reader から SSE イベントを読み取る bufio.Scanner を作成する。
+func newSSEScanner(r io.Reader) *bufio.Scanner {
+	return bufio.NewScanner(r)
+}
+
+// readNextSSEEvent は SSE ストリームから次のイベントを読み取る。
+func readNextSSEEvent(t *testing.T, scanner *bufio.Scanner) sseEventData {
+	t.Helper()
+	var ev sseEventData
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if ev.event != "" || ev.data != "" {
+				return ev
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "event: ") {
+			ev.event = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			ev.data = strings.TrimPrefix(line, "data: ")
+		}
+	}
+	if ev.event != "" || ev.data != "" {
+		return ev
+	}
+	t.Fatal("SSE stream ended without receiving event")
+	return ev // unreachable
+}
+
+// postMCPMessage は MCP メッセージエンドポイントに JSON-RPC リクエストを送信する。
+func postMCPMessage(t *testing.T, url, bearerToken string, id any, method string, params map[string]any) {
+	t.Helper()
+
+	body := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+	}
+	if params != nil {
+		body["params"] = params
+	}
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("failed to marshal JSON-RPC request: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("failed POST message: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 202 for message, got %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 }
