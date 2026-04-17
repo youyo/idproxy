@@ -140,21 +140,26 @@ func splitTrim(s string) []string {
 // printUsage prints the usage message for the idproxy command.
 func printUsage() {
 	w := flag.CommandLine.Output()
-	fmt.Fprintf(w, "Usage: idproxy\n\n")
-	fmt.Fprintf(w, "OIDC authentication reverse proxy and MCP OAuth 2.1 Authorization Server.\n\n")
-	fmt.Fprintf(w, "Environment Variables:\n\n")
-	fmt.Fprintf(w, "  Required:\n")
-	fmt.Fprintf(w, "    UPSTREAM_URL          Backend URL to proxy to (e.g. http://localhost:3000)\n")
-	fmt.Fprintf(w, "    EXTERNAL_URL          External URL of this service (e.g. https://proxy.example.com)\n")
-	fmt.Fprintf(w, "    COOKIE_SECRET         Cookie encryption key, hex-encoded 32+ bytes\n")
-	fmt.Fprintf(w, "                          Generate with: openssl rand -hex 32\n")
-	fmt.Fprintf(w, "    OIDC_ISSUER           OIDC Issuer URL (comma-separated for multiple providers)\n")
-	fmt.Fprintf(w, "    OIDC_CLIENT_ID        OAuth Client ID (comma-separated for multiple providers)\n\n")
-	fmt.Fprintf(w, "  Optional:\n")
-	fmt.Fprintf(w, "    OIDC_CLIENT_SECRET    OAuth Client Secret (comma-separated for multiple providers)\n")
-	fmt.Fprintf(w, "    OIDC_PROVIDER_NAME    Provider display name (comma-separated for multiple providers)\n")
-	fmt.Fprintf(w, "    ALLOWED_DOMAINS       Allowed email domains (comma-separated)\n")
-	fmt.Fprintf(w, "    ALLOWED_EMAILS        Allowed email addresses (comma-separated)\n")
-	fmt.Fprintf(w, "    PATH_PREFIX           OAuth 2.1 AS endpoint path prefix\n")
-	fmt.Fprintf(w, "    PORT                  Listen port (default: 8080)\n")
+	fmt.Fprint(w, `Usage: idproxy
+
+OIDC authentication reverse proxy and MCP OAuth 2.1 Authorization Server.
+
+Environment Variables:
+
+  Required:
+    UPSTREAM_URL          Backend URL to proxy to (e.g. http://localhost:3000)
+    EXTERNAL_URL          External URL of this service (e.g. https://proxy.example.com)
+    COOKIE_SECRET         Cookie encryption key, hex-encoded 32+ bytes
+                          Generate with: openssl rand -hex 32
+    OIDC_ISSUER           OIDC Issuer URL (comma-separated for multiple providers)
+    OIDC_CLIENT_ID        OAuth Client ID (comma-separated for multiple providers)
+
+  Optional:
+    OIDC_CLIENT_SECRET    OAuth Client Secret (comma-separated for multiple providers)
+    OIDC_PROVIDER_NAME    Provider display name (comma-separated for multiple providers)
+    ALLOWED_DOMAINS       Allowed email domains (comma-separated)
+    ALLOWED_EMAILS        Allowed email addresses (comma-separated)
+    PATH_PREFIX           OAuth 2.1 AS endpoint path prefix
+    PORT                  Listen port (default: 8080)
+`) //nolint:errcheck
 }

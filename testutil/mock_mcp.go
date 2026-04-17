@@ -135,7 +135,7 @@ func (m *MockMCP) handleSSE(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	// エンドポイント情報を送信
-	fmt.Fprintf(w, "event: endpoint\ndata: /message?session_id=%s\n\n", sessionID)
+	_, _ = fmt.Fprintf(w, "event: endpoint\ndata: /message?session_id=%s\n\n", sessionID)
 	flusher.Flush()
 
 	// コンテキストがキャンセルされるまでレスポンスを送信
@@ -153,7 +153,7 @@ func (m *MockMCP) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(data))
+			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(data))
 			flusher.Flush()
 		}
 	}

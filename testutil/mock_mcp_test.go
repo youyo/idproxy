@@ -63,7 +63,7 @@ func connectSSE(t *testing.T, mcpURL string) (string, *bufio.Scanner, *http.Resp
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("expected 200 for /sse, got %d", resp.StatusCode)
 	}
 
@@ -72,11 +72,11 @@ func connectSSE(t *testing.T, mcpURL string) (string, *bufio.Scanner, *http.Resp
 	// endpoint イベントを読み取り
 	ev := readSSEEvent(scanner)
 	if ev == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatal("no SSE event received")
 	}
 	if ev.Event != "endpoint" {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("expected event=endpoint, got %s", ev.Event)
 	}
 
