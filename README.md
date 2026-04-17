@@ -208,6 +208,67 @@ func main() {
 }
 ```
 
+## DynamoDB Store
+
+For multi-instance deployments (e.g., AWS Lambda with multiple concurrent containers), use `DynamoDBStore` to share state across instances.
+
+### Usage
+
+```go
+import "github.com/youyo/idproxy/store"
+
+s, err := store.NewDynamoDBStore("my-idproxy-table", "ap-northeast-1")
+if err != nil {
+    log.Fatal(err)
+}
+defer s.Close()
+
+cfg := idproxy.Config{
+    Store: s,
+    // ...
+}
+```
+
+### Create DynamoDB Table
+
+```bash
+aws dynamodb create-table \
+  --table-name my-idproxy-table \
+  --attribute-definitions AttributeName=pk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --region ap-northeast-1
+
+# Enable TTL on the "ttl" attribute
+aws dynamodb update-time-to-live \
+  --table-name my-idproxy-table \
+  --time-to-live-specification "Enabled=true,AttributeName=ttl" \
+  --region ap-northeast-1
+```
+
+### IAM Permissions (Minimum)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:123456789012:table/my-idproxy-table"
+    }
+  ]
+}
+```
+
+> **Security**: The `data` attribute contains sensitive information (session data, access tokens). Enable [DynamoDB server-side encryption with AWS KMS (SSE-KMS)](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/EncryptionAtRest.html) for production use.
+
+> **Note**: `Cleanup()` is a no-op — expired items are removed automatically by DynamoDB TTL. DynamoDB TTL may have up to 48 hours of lag; `DynamoDBStore` compensates by checking the `ttl` attribute on every `Get` and returning `nil` for expired items.
+
 ## License
 
 [MIT License](LICENSE)

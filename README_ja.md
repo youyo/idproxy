@@ -206,6 +206,67 @@ func main() {
 }
 ```
 
+## DynamoDB Store
+
+AWS Lambda のマルチコンテナ環境など、複数インスタンスで状態を共有する必要がある場合は `DynamoDBStore` を使用します。
+
+### 使い方
+
+```go
+import "github.com/youyo/idproxy/store"
+
+s, err := store.NewDynamoDBStore("my-idproxy-table", "ap-northeast-1")
+if err != nil {
+    log.Fatal(err)
+}
+defer s.Close()
+
+cfg := idproxy.Config{
+    Store: s,
+    // ...
+}
+```
+
+### DynamoDB テーブル作成
+
+```bash
+aws dynamodb create-table \
+  --table-name my-idproxy-table \
+  --attribute-definitions AttributeName=pk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --region ap-northeast-1
+
+# ttl 属性で TTL を有効化
+aws dynamodb update-time-to-live \
+  --table-name my-idproxy-table \
+  --time-to-live-specification "Enabled=true,AttributeName=ttl" \
+  --region ap-northeast-1
+```
+
+### IAM 権限（最小構成）
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:123456789012:table/my-idproxy-table"
+    }
+  ]
+}
+```
+
+> **セキュリティ**: `data` 属性にはセッションデータやアクセストークン等の機密情報が含まれます。本番環境では [AWS KMS による DynamoDB サーバーサイド暗号化 (SSE-KMS)](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/EncryptionAtRest.html) を有効にすることを強く推奨します。
+
+> **注意**: `Cleanup()` は no-op です。期限切れアイテムは DynamoDB TTL が自動削除します。DynamoDB TTL には最大 48 時間の遅延がありますが、`DynamoDBStore` はすべての `Get` 時に `ttl` 属性と現在時刻を比較し、期限切れの場合は `nil` を返す実装でこれを補完しています。
+
 ## ライセンス
 
 [MIT License](LICENSE)
