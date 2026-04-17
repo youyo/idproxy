@@ -182,6 +182,15 @@
 - [x] .github/workflows/ci.yml（テスト、lint、ビルド）
 - [x] .github/workflows/release.yml（tag → GoReleaser）
 
+### M21: DynamoDB Store 実装 (v0.2.0) ✅
+- [x] `store/dynamodb.go` — `DynamoDBStore` + `DynamoDBClient` インターフェース + 2コンストラクタ + 10メソッド
+- [x] `store/dynamodb_test.go` — mock ベーステスト (N01-N08, T01-T04, E01-E07, C01-C02, G01-G03)
+- [x] `store/doc.go` — DynamoDB Store の言及追加
+- [x] `README.md` / `README_ja.md` — 使用例 + テーブル作成 + IAM 権限
+- [x] `CHANGELOG.md` — v0.2.0 エントリ追加
+- [x] `go.mod` / `go.sum` — `aws-sdk-go-v2/config`, `aws-sdk-go-v2/service/dynamodb` 依存追加
+- 📄 詳細: plans/idproxy-m21-dynamodb-store.md
+
 ## Blockers
 なし
 
