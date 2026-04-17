@@ -110,7 +110,7 @@ func postJSONRPC(t *testing.T, url string, id any, method string, params map[str
 	if err != nil {
 		t.Fatalf("failed to POST message: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("expected 202 Accepted, got %d", resp.StatusCode)
@@ -133,7 +133,7 @@ func TestMockMCP_SSEEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -163,7 +163,7 @@ func TestMockMCP_Initialize(t *testing.T) {
 	mcp := testutil.NewMockMCP(t)
 
 	messageURL, scanner, resp := connectSSE(t, mcp.URL())
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	postJSONRPC(t, messageURL, 1, "initialize", map[string]any{})
 
@@ -203,7 +203,7 @@ func TestMockMCP_ToolsList(t *testing.T) {
 	mcp := testutil.NewMockMCP(t)
 
 	messageURL, scanner, resp := connectSSE(t, mcp.URL())
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	postJSONRPC(t, messageURL, 2, "tools/list", nil)
 
@@ -242,7 +242,7 @@ func TestMockMCP_ToolsCall(t *testing.T) {
 	mcp := testutil.NewMockMCP(t)
 
 	messageURL, scanner, resp := connectSSE(t, mcp.URL())
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	postJSONRPC(t, messageURL, 3, "tools/call", map[string]any{
 		"name":      "echo",
@@ -296,7 +296,7 @@ func TestMockMCP_InvalidMethod(t *testing.T) {
 	mcp := testutil.NewMockMCP(t)
 
 	messageURL, scanner, resp := connectSSE(t, mcp.URL())
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	postJSONRPC(t, messageURL, 4, "nonexistent/method", nil)
 

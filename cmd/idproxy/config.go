@@ -140,7 +140,7 @@ func splitTrim(s string) []string {
 // printUsage prints the usage message for the idproxy command.
 func printUsage() {
 	w := flag.CommandLine.Output()
-	fmt.Fprint(w, `Usage: idproxy
+	_, _ = fmt.Fprint(w, `Usage: idproxy
 
 OIDC authentication reverse proxy and MCP OAuth 2.1 Authorization Server.
 
@@ -161,5 +161,5 @@ Environment Variables:
     ALLOWED_EMAILS        Allowed email addresses (comma-separated)
     PATH_PREFIX           OAuth 2.1 AS endpoint path prefix
     PORT                  Listen port (default: 8080)
-`) //nolint:errcheck
+`)
 }
