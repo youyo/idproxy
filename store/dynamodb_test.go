@@ -20,10 +20,10 @@ import (
 // fakeDynamoDBClient は DynamoDBClient インターフェースのインメモリ実装。
 // map-backed でスレッドセーフ、エラー注入フック付き。
 type fakeDynamoDBClient struct {
-	mu           sync.Mutex
-	items        map[string]map[string]types.AttributeValue // pk -> full item
-	getItemErr   error
-	putItemErr   error
+	mu            sync.Mutex
+	items         map[string]map[string]types.AttributeValue // pk -> full item
+	getItemErr    error
+	putItemErr    error
 	deleteItemErr error
 	// PutItem に渡された最後のアイテムを記録 (T04 検証用)
 	lastPutItem map[string]types.AttributeValue
@@ -82,6 +82,42 @@ func (f *fakeDynamoDBClient) PutItem(ctx context.Context, params *dynamodb.PutIt
 		return &dynamodb.PutItemOutput{}, nil
 	}
 
+	// ConditionExpression の評価
+	if params.ConditionExpression != nil {
+		switch *params.ConditionExpression {
+		case "attribute_exists(pk)":
+			// pk が存在しない場合は ConditionalCheckFailedException を返す
+			if _, exists := f.items[pkVal.Value]; !exists {
+				return nil, &types.ConditionalCheckFailedException{
+					Message: stringPtr("The conditional request failed"),
+				}
+			}
+		case "attribute_exists(pk) AND used = :false":
+			// pk が存在し、かつ top-level used 属性が false の場合のみ成功
+			// この評価は mutex 保護下で atomic に行われる
+			existing, exists := f.items[pkVal.Value]
+			if !exists {
+				return nil, &types.ConditionalCheckFailedException{
+					Message: stringPtr("The conditional request failed"),
+				}
+			}
+			usedAttr, hasUsed := existing["used"]
+			if !hasUsed {
+				// used 属性がない = 旧フォーマット。条件失敗とする
+				return nil, &types.ConditionalCheckFailedException{
+					Message: stringPtr("The conditional request failed"),
+				}
+			}
+			boolAttr, ok := usedAttr.(*types.AttributeValueMemberBOOL)
+			if !ok || boolAttr.Value {
+				// used が true (または型不正) → 既に消費済み
+				return nil, &types.ConditionalCheckFailedException{
+					Message: stringPtr("The conditional request failed"),
+				}
+			}
+		}
+	}
+
 	// アイテムを保存
 	copied := make(map[string]types.AttributeValue, len(params.Item))
 	for k, v := range params.Item {
@@ -92,6 +128,9 @@ func (f *fakeDynamoDBClient) PutItem(ctx context.Context, params *dynamodb.PutIt
 
 	return &dynamodb.PutItemOutput{}, nil
 }
+
+// stringPtr は文字列のポインタを返すヘルパー。
+func stringPtr(s string) *string { return &s }
 
 func (f *fakeDynamoDBClient) DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
 	f.mu.Lock()
@@ -891,6 +930,385 @@ func TestDynamoDBStore_G02_EmptyID(t *testing.T) {
 	}
 }
 
+// --- RT: RefreshToken テスト ---
+
+func testDynamoDBRefreshTokenData() *idproxy.RefreshTokenData {
+	now := time.Now().UTC().Truncate(time.Second)
+	return &idproxy.RefreshTokenData{
+		ID:        "rt-ddb-opaque-001",
+		FamilyID:  "family-ddb-uuid-001",
+		ClientID:  "client-ddb-001",
+		Subject:   "sub-001",
+		Email:     "test@example.com",
+		Name:      "Test User",
+		Scopes:    []string{"openid", "profile"},
+		IssuedAt:  now,
+		ExpiresAt: now.Add(30 * 24 * time.Hour),
+		Used:      false,
+	}
+}
+
+// RT01: SetRefreshToken → GetRefreshToken で同一値が取得できること
+func TestDynamoDBStore_RT01_SetGetRefreshToken(t *testing.T) {
+	s, _ := newTestDynamoDBStore(nil)
+	ctx := context.Background()
+	data := testDynamoDBRefreshTokenData()
+
+	if err := s.SetRefreshToken(ctx, data.ID, data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	got, err := s.GetRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("GetRefreshToken() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetRefreshToken() returned nil")
+	}
+	if got.ID != data.ID {
+		t.Errorf("ID = %q, want %q", got.ID, data.ID)
+	}
+	if got.FamilyID != data.FamilyID {
+		t.Errorf("FamilyID = %q, want %q", got.FamilyID, data.FamilyID)
+	}
+	if got.ClientID != data.ClientID {
+		t.Errorf("ClientID = %q, want %q", got.ClientID, data.ClientID)
+	}
+	if got.Used {
+		t.Error("Used = true, want false")
+	}
+}
+
+// RT02: GetRefreshToken 未登録は (nil, nil)
+func TestDynamoDBStore_RT02_GetRefreshToken_NotFound(t *testing.T) {
+	s, _ := newTestDynamoDBStore(nil)
+	ctx := context.Background()
+
+	got, err := s.GetRefreshToken(ctx, "nonexistent-rt")
+	if err != nil {
+		t.Fatalf("GetRefreshToken() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetRefreshToken() = %v, want nil", got)
+	}
+}
+
+// RT03: GetRefreshToken TTL 切れは (nil, nil)
+func TestDynamoDBStore_RT03_GetRefreshToken_Expired(t *testing.T) {
+	baseTime := time.Now().UTC()
+	callCount := int32(0)
+	nowFn := func() time.Time {
+		if atomic.AddInt32(&callCount, 1) <= 1 {
+			return baseTime
+		}
+		return baseTime.Add(time.Second)
+	}
+
+	s, _ := newTestDynamoDBStore(nowFn)
+	ctx := context.Background()
+	data := testDynamoDBRefreshTokenData()
+
+	if err := s.SetRefreshToken(ctx, data.ID, data, time.Nanosecond); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	got, err := s.GetRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("GetRefreshToken() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetRefreshToken() = %v, want nil (expired)", got)
+	}
+}
+
+// RT04: ConsumeRefreshToken 初回消費 — Used=true に更新され、data が返る
+func TestDynamoDBStore_RT04_ConsumeRefreshToken_FirstConsume(t *testing.T) {
+	s, _ := newTestDynamoDBStore(nil)
+	ctx := context.Background()
+	data := testDynamoDBRefreshTokenData()
+
+	if err := s.SetRefreshToken(ctx, data.ID, data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	got, err := s.ConsumeRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got == nil {
+		t.Fatal("ConsumeRefreshToken() returned nil")
+	}
+	if !got.Used {
+		t.Error("Used = false, want true (should be marked as used)")
+	}
+	if got.FamilyID != data.FamilyID {
+		t.Errorf("FamilyID = %q, want %q", got.FamilyID, data.FamilyID)
+	}
+
+	// Store 上のエントリも Used=true になっていること
+	stored, _ := s.GetRefreshToken(ctx, data.ID)
+	if stored == nil {
+		t.Fatal("GetRefreshToken() after consume returned nil")
+	}
+	if !stored.Used {
+		t.Error("stored Used = false, want true after consume")
+	}
+}
+
+// RT05: ConsumeRefreshToken 2回目 — (data, ErrRefreshTokenAlreadyConsumed) が返る
+func TestDynamoDBStore_RT05_ConsumeRefreshToken_SecondConsume(t *testing.T) {
+	s, _ := newTestDynamoDBStore(nil)
+	ctx := context.Background()
+	data := testDynamoDBRefreshTokenData()
+
+	if err := s.SetRefreshToken(ctx, data.ID, data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	// 1回目の消費
+	got1, err := s.ConsumeRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("first ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got1 == nil {
+		t.Fatal("first ConsumeRefreshToken() returned nil")
+	}
+
+	// 2回目の消費
+	got2, err := s.ConsumeRefreshToken(ctx, data.ID)
+	if err == nil {
+		t.Fatal("second ConsumeRefreshToken() error = nil, want ErrRefreshTokenAlreadyConsumed")
+	}
+	if err != idproxy.ErrRefreshTokenAlreadyConsumed {
+		t.Errorf("second ConsumeRefreshToken() error = %v, want %v", err, idproxy.ErrRefreshTokenAlreadyConsumed)
+	}
+	if got2 == nil {
+		t.Fatal("second ConsumeRefreshToken() returned nil data, want data with FamilyID")
+	}
+	if got2.FamilyID != data.FamilyID {
+		t.Errorf("FamilyID = %q, want %q (for replay detection)", got2.FamilyID, data.FamilyID)
+	}
+}
+
+// RT06: ConsumeRefreshToken 未登録 — (nil, nil)
+func TestDynamoDBStore_RT06_ConsumeRefreshToken_NotFound(t *testing.T) {
+	s, _ := newTestDynamoDBStore(nil)
+	ctx := context.Background()
+
+	got, err := s.ConsumeRefreshToken(ctx, "nonexistent-rt")
+	if err != nil {
+		t.Fatalf("ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("ConsumeRefreshToken() = %v, want nil", got)
+	}
+}
+
+// RT07: ConsumeRefreshToken TTL 切れ — (nil, nil)
+func TestDynamoDBStore_RT07_ConsumeRefreshToken_Expired(t *testing.T) {
+	baseTime := time.Now().UTC()
+	callCount := int32(0)
+	nowFn := func() time.Time {
+		if atomic.AddInt32(&callCount, 1) <= 1 {
+			return baseTime
+		}
+		return baseTime.Add(time.Second)
+	}
+
+	s, _ := newTestDynamoDBStore(nowFn)
+	ctx := context.Background()
+	data := testDynamoDBRefreshTokenData()
+
+	if err := s.SetRefreshToken(ctx, data.ID, data, time.Nanosecond); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	got, err := s.ConsumeRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("ConsumeRefreshToken() = %v, want nil (expired)", got)
+	}
+}
+
+// RT08: SetFamilyRevocation → IsFamilyRevoked=true
+func TestDynamoDBStore_RT08_SetFamilyRevocation(t *testing.T) {
+	s, _ := newTestDynamoDBStore(nil)
+	ctx := context.Background()
+	familyID := "family-ddb-uuid-001"
+
+	if err := s.SetFamilyRevocation(ctx, familyID, time.Hour); err != nil {
+		t.Fatalf("SetFamilyRevocation() error = %v", err)
+	}
+
+	revoked, err := s.IsFamilyRevoked(ctx, familyID)
+	if err != nil {
+		t.Fatalf("IsFamilyRevoked() error = %v", err)
+	}
+	if !revoked {
+		t.Error("IsFamilyRevoked() = false, want true")
+	}
+}
+
+// RT09: 未設定 family → IsFamilyRevoked=false
+func TestDynamoDBStore_RT09_IsFamilyRevoked_NotSet(t *testing.T) {
+	s, _ := newTestDynamoDBStore(nil)
+	ctx := context.Background()
+
+	revoked, err := s.IsFamilyRevoked(ctx, "unknown-family")
+	if err != nil {
+		t.Fatalf("IsFamilyRevoked() error = %v", err)
+	}
+	if revoked {
+		t.Error("IsFamilyRevoked() = true, want false")
+	}
+}
+
+// RT10: SetFamilyRevocation TTL 切れ → IsFamilyRevoked=false
+func TestDynamoDBStore_RT10_IsFamilyRevoked_Expired(t *testing.T) {
+	baseTime := time.Now().UTC()
+	callCount := int32(0)
+	nowFn := func() time.Time {
+		if atomic.AddInt32(&callCount, 1) <= 1 {
+			return baseTime
+		}
+		return baseTime.Add(time.Second)
+	}
+
+	s, _ := newTestDynamoDBStore(nowFn)
+	ctx := context.Background()
+	familyID := "family-ddb-uuid-expired"
+
+	if err := s.SetFamilyRevocation(ctx, familyID, time.Nanosecond); err != nil {
+		t.Fatalf("SetFamilyRevocation() error = %v", err)
+	}
+
+	revoked, err := s.IsFamilyRevoked(ctx, familyID)
+	if err != nil {
+		t.Fatalf("IsFamilyRevoked() error = %v", err)
+	}
+	if revoked {
+		t.Error("IsFamilyRevoked() = true, want false (expired)")
+	}
+}
+
+// RT11: ConsumeRefreshToken — CAS 失敗後、追加 GetItem で found → (data, ErrRefreshTokenAlreadyConsumed)
+//
+// シミュレーション: PutItem を ConditionalCheckFailedException に設定し、items を残したまま。
+// 追加 GetItem が成功してデータと ErrRefreshTokenAlreadyConsumed を返すことを検証する。
+func TestDynamoDBStore_RT11_ConsumeRefreshToken_CASFailure_RetryFound(t *testing.T) {
+	ctx := context.Background()
+	data := testDynamoDBRefreshTokenData()
+	futureUnix := data.ExpiresAt.Unix()
+	itemJSON := fmt.Sprintf(
+		`{"ID":%q,"FamilyID":%q,"ClientID":%q,"Subject":%q,"Email":%q,"Name":%q,"Scopes":["openid","profile"],"IssuedAt":%q,"ExpiresAt":%q,"Used":false}`,
+		data.ID, data.FamilyID, data.ClientID, data.Subject, data.Email, data.Name,
+		data.IssuedAt.Format(time.RFC3339), data.ExpiresAt.Format(time.RFC3339),
+	)
+
+	fc := newFakeDynamoDBClient()
+	store := NewDynamoDBStoreWithClient(fc, "test-table")
+
+	fc.mu.Lock()
+	fc.items["refreshtoken:"+data.ID] = map[string]types.AttributeValue{
+		"pk":   &types.AttributeValueMemberS{Value: "refreshtoken:" + data.ID},
+		"data": &types.AttributeValueMemberS{Value: itemJSON},
+		"ttl":  &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", futureUnix)},
+	}
+	// PutItem は CAS 失敗を返す（items は残したまま → 追加 GetItem で found）
+	fc.putItemErr = &types.ConditionalCheckFailedException{
+		Message: stringPtr("The conditional request failed"),
+	}
+	fc.mu.Unlock()
+
+	got, err := store.ConsumeRefreshToken(ctx, data.ID)
+	if err == nil {
+		t.Fatal("ConsumeRefreshToken() error = nil, want ErrRefreshTokenAlreadyConsumed")
+	}
+	if err != idproxy.ErrRefreshTokenAlreadyConsumed {
+		t.Errorf("error = %v, want ErrRefreshTokenAlreadyConsumed", err)
+	}
+	if got == nil {
+		t.Fatal("ConsumeRefreshToken() returned nil data, want data")
+	}
+	if got.FamilyID != data.FamilyID {
+		t.Errorf("FamilyID = %q, want %q", got.FamilyID, data.FamilyID)
+	}
+}
+
+// RT11E: ConsumeRefreshToken CAS 失敗後、TTL 消滅（追加 GetItem → not found）→ (nil, nil)
+// countingFakeDynamoDBClient を使用: GetItem 1回目=found, PutItem=CAS失敗, GetItem 2回目=not found
+func TestDynamoDBStore_RT11E_ConsumeRefreshToken_CASFailure_TTLExpired(t *testing.T) {
+	ctx := context.Background()
+	data := testDynamoDBRefreshTokenData()
+	futureUnix := data.ExpiresAt.Unix()
+	itemJSON := fmt.Sprintf(
+		`{"ID":%q,"FamilyID":%q,"ClientID":%q,"Subject":%q,"Email":%q,"Name":%q,"Scopes":["openid","profile"],"IssuedAt":%q,"ExpiresAt":%q,"Used":false}`,
+		data.ID, data.FamilyID, data.ClientID, data.Subject, data.Email, data.Name,
+		data.IssuedAt.Format(time.RFC3339), data.ExpiresAt.Format(time.RFC3339),
+	)
+	item := map[string]types.AttributeValue{
+		"pk":   &types.AttributeValueMemberS{Value: "refreshtoken:" + data.ID},
+		"data": &types.AttributeValueMemberS{Value: itemJSON},
+		"ttl":  &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", futureUnix)},
+	}
+
+	store := NewDynamoDBStoreWithClient(
+		newGetOnceDeleteAfterPutFakeClient(item),
+		"test-table",
+	)
+
+	got, err := store.ConsumeRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("ConsumeRefreshToken() = %v, want nil (TTL expired after CAS)", got)
+	}
+}
+
+// getOnceDeleteAfterPutFakeClient は DynamoDBClient の特殊実装。
+// GetItem の 1回目は指定アイテムを返し、PutItem は CAS 失敗を返しつつアイテムを削除し、
+// 2回目以降の GetItem は not found を返す。
+type getOnceDeleteAfterPutFakeClient struct {
+	mu      sync.Mutex
+	item    map[string]types.AttributeValue
+	putSeen bool
+}
+
+func newGetOnceDeleteAfterPutFakeClient(item map[string]types.AttributeValue) *getOnceDeleteAfterPutFakeClient {
+	return &getOnceDeleteAfterPutFakeClient{item: item}
+}
+
+func (c *getOnceDeleteAfterPutFakeClient) GetItem(_ context.Context, params *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.putSeen || c.item == nil {
+		// PutItem 後 または アイテム未設定 → not found
+		return &dynamodb.GetItemOutput{}, nil
+	}
+	// 初回: アイテムのコピーを返す
+	copied := make(map[string]types.AttributeValue, len(c.item))
+	for k, v := range c.item {
+		copied[k] = v
+	}
+	return &dynamodb.GetItemOutput{Item: copied}, nil
+}
+
+func (c *getOnceDeleteAfterPutFakeClient) PutItem(_ context.Context, _ *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.putSeen = true
+	return nil, &types.ConditionalCheckFailedException{
+		Message: stringPtr("The conditional request failed"),
+	}
+}
+
+func (c *getOnceDeleteAfterPutFakeClient) DeleteItem(_ context.Context, _ *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	return &dynamodb.DeleteItemOutput{}, nil
+}
+
 // G03: Cleanup(ctx) を呼び出すと nil が返ること (no-op)
 func TestDynamoDBStore_G03_Cleanup_NoOp(t *testing.T) {
 	s, _ := newTestDynamoDBStore(nil)
@@ -898,6 +1316,71 @@ func TestDynamoDBStore_G03_Cleanup_NoOp(t *testing.T) {
 
 	if err := s.Cleanup(ctx); err != nil {
 		t.Errorf("Cleanup() error = %v, want nil", err)
+	}
+}
+
+// Race: 20 goroutine が同一 refresh_token を同時 ConsumeRefreshToken
+// 期待: 成功 (err==nil) は正確に 1 個、残り 19 個は ErrRefreshTokenAlreadyConsumed
+// fake client は PutItem の ConditionExpression を atomic に評価する必要がある
+func TestDynamoDBStore_ConsumeRefreshToken_Race(t *testing.T) {
+	s, _ := newTestDynamoDBStore(nil)
+	ctx := context.Background()
+	data := testDynamoDBRefreshTokenData()
+
+	if err := s.SetRefreshToken(ctx, data.ID, data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	const goroutines = 20
+	// startGate で全 goroutine を同時にリリース
+	var startGate sync.WaitGroup
+	startGate.Add(1)
+
+	type result struct {
+		data *idproxy.RefreshTokenData
+		err  error
+	}
+	results := make([]result, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := range goroutines {
+		go func(idx int) {
+			defer wg.Done()
+			startGate.Wait() // 全 goroutine が揃うまで待機
+			d, err := s.ConsumeRefreshToken(ctx, data.ID)
+			results[idx] = result{data: d, err: err}
+		}(i)
+	}
+
+	startGate.Done() // 全 goroutine を同時リリース
+	wg.Wait()
+
+	successCount := 0
+	alreadyConsumedCount := 0
+	for _, r := range results {
+		if r.err == nil {
+			successCount++
+			if r.data == nil {
+				t.Error("success result: data is nil, want non-nil")
+			} else if !r.data.Used {
+				t.Error("success result: data.Used = false, want true")
+			}
+		} else if errors.Is(r.err, idproxy.ErrRefreshTokenAlreadyConsumed) {
+			alreadyConsumedCount++
+			if r.data == nil {
+				t.Error("ErrRefreshTokenAlreadyConsumed result: data is nil, want non-nil with FamilyID")
+			}
+		} else {
+			t.Errorf("unexpected error: %v", r.err)
+		}
+	}
+
+	if successCount != 1 {
+		t.Errorf("success count = %d, want exactly 1", successCount)
+	}
+	if alreadyConsumedCount != goroutines-1 {
+		t.Errorf("alreadyConsumed count = %d, want %d", alreadyConsumedCount, goroutines-1)
 	}
 }
 
@@ -1000,8 +1483,8 @@ func TestDynamoDBStore_UTC03_AccessToken_TimeNormalized(t *testing.T) {
 	expiresAt := time.Date(2025, 6, 1, 13, 0, 0, 0, jst)
 
 	data := &idproxy.AccessTokenData{
-		JTI:      "utc-test-jti",
-		IssuedAt: issuedAt,
+		JTI:       "utc-test-jti",
+		IssuedAt:  issuedAt,
 		ExpiresAt: expiresAt,
 	}
 

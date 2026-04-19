@@ -361,3 +361,34 @@ func TestValidate_ExternalURL_Empty(t *testing.T) {
 		t.Errorf("error should mention external_url: %v", err)
 	}
 }
+
+// T13: RefreshTokenTTL=0 で Validate() 後に 30 * 24 * time.Hour が適用される
+func TestValidate_DefaultRefreshTokenTTL(t *testing.T) {
+	cfg := validConfig()
+	cfg.RefreshTokenTTL = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RefreshTokenTTL != 30*24*time.Hour {
+		t.Errorf("RefreshTokenTTL: got %v, want %v", cfg.RefreshTokenTTL, 30*24*time.Hour)
+	}
+}
+
+// T13: 明示的に設定された RefreshTokenTTL が保持される
+func TestValidate_ExplicitRefreshTokenTTL(t *testing.T) {
+	cfg := validConfig()
+	cfg.RefreshTokenTTL = 7 * 24 * time.Hour
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RefreshTokenTTL != 7*24*time.Hour {
+		t.Errorf("RefreshTokenTTL: got %v, want %v", cfg.RefreshTokenTTL, 7*24*time.Hour)
+	}
+}
+
+// T13: DefaultConfig に RefreshTokenTTL が設定されている
+func TestDefaultConfig_RefreshTokenTTL(t *testing.T) {
+	if DefaultConfig.RefreshTokenTTL != 30*24*time.Hour {
+		t.Errorf("DefaultConfig.RefreshTokenTTL: got %v, want %v", DefaultConfig.RefreshTokenTTL, 30*24*time.Hour)
+	}
+}

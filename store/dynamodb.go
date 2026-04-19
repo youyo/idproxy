@@ -75,10 +75,12 @@ func NewDynamoDBStoreWithClient(client DynamoDBClient, tableName string) *Dynamo
 
 // --- PK 生成ヘルパー ---
 
-func sessionPK(id string) string      { return "session:" + id }
-func authCodePK(code string) string   { return "authcode:" + code }
-func accessTokenPK(jti string) string { return "accesstoken:" + jti }
-func clientPK(clientID string) string { return "client:" + clientID }
+func sessionPK(id string) string             { return "session:" + id }
+func authCodePK(code string) string          { return "authcode:" + code }
+func accessTokenPK(jti string) string        { return "accesstoken:" + jti }
+func clientPK(clientID string) string        { return "client:" + clientID }
+func refreshTokenPK(id string) string        { return "refreshtoken:" + id }
+func familyRevokedPK(familyID string) string { return "familyrevoked:" + familyID }
 
 // --- 属性生成ヘルパー ---
 
@@ -417,6 +419,187 @@ func (s *DynamoDBStore) DeleteClient(ctx context.Context, clientID string) error
 		return fmt.Errorf("dynamodb store: delete client: %w", err)
 	}
 	return nil
+}
+
+// --- RefreshToken 操作 ---
+
+// putRefreshTokenItem は RefreshTokenData を DynamoDB に PutItem する。
+// 通常の putItemJSON と異なり、top-level の `used` Boolean 属性を追加で保存する。
+// これにより ConsumeRefreshToken の ConditionExpression で `used = :false` を原子的に評価できる。
+func (s *DynamoDBStore) putRefreshTokenItem(ctx context.Context, pk string, data *idproxy.RefreshTokenData, ttlEpoch int64) error {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+
+	item := map[string]types.AttributeValue{
+		"pk":   stringAttr(pk),
+		"data": stringAttr(string(b)),
+		"ttl":  numberAttr(ttlEpoch),
+		"used": &types.AttributeValueMemberBOOL{Value: data.Used},
+	}
+
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &s.tableName,
+		Item:      item,
+	})
+	return err
+}
+
+// SetRefreshToken はリフレッシュトークンを保存する。
+// top-level `used` 属性（false）を付与して atomic ConsumeRefreshToken を可能にする。
+// time.Time フィールドは UTC に正規化してからシリアライズする。
+func (s *DynamoDBStore) SetRefreshToken(ctx context.Context, id string, data *idproxy.RefreshTokenData, ttl time.Duration) error {
+	if err := s.checkAvailable(ctx); err != nil {
+		return err
+	}
+
+	// UTC 正規化コピーを作成する。
+	normalized := *data
+	normalized.IssuedAt = data.IssuedAt.UTC()
+	normalized.ExpiresAt = data.ExpiresAt.UTC()
+	normalized.Used = false // 新規保存は常に Used=false
+
+	ttlEpoch := s.now().UTC().Add(ttl).Unix()
+	if err := s.putRefreshTokenItem(ctx, refreshTokenPK(id), &normalized, ttlEpoch); err != nil {
+		return fmt.Errorf("dynamodb store: set refresh token: %w", err)
+	}
+	return nil
+}
+
+// GetRefreshToken はリフレッシュトークンを取得する。
+// 存在しない場合または期限切れの場合は (nil, nil) を返す。
+func (s *DynamoDBStore) GetRefreshToken(ctx context.Context, id string) (*idproxy.RefreshTokenData, error) {
+	if err := s.checkAvailable(ctx); err != nil {
+		return nil, err
+	}
+
+	var data idproxy.RefreshTokenData
+	found, err := s.getItemJSON(ctx, refreshTokenPK(id), true, true, &data)
+	if err != nil {
+		return nil, fmt.Errorf("dynamodb store: get refresh token: %w", err)
+	}
+	if !found {
+		return nil, nil
+	}
+	return &data, nil
+}
+
+// ConsumeRefreshToken はリフレッシュトークンを消費する。
+// GetItem (ConsistentRead=true) → Used フラグ確認 →
+// PutItem + ConditionExpression "attribute_exists(pk) AND used = :false" の CAS パターンで実装する。
+//
+// top-level `used` 属性を条件式で評価することで、並行実行時に 2 つの goroutine が
+// 同時に消費成功することを防ぐ（atomic compare-and-swap）。
+//
+// 振る舞い:
+//   - 未登録または期限切れ: (nil, nil)
+//   - 初回消費 (Used=false): Used=true で PutItem し (data, nil) を返す
+//   - 2回目以降 (Used=true): (data, idproxy.ErrRefreshTokenAlreadyConsumed) を返す
+//   - CAS 競合 (ConditionalCheckFailedException): race で敗北した場合は追加 GetItem で最新 data を取得し
+//     (data, ErrRefreshTokenAlreadyConsumed) を返す
+func (s *DynamoDBStore) ConsumeRefreshToken(ctx context.Context, id string) (*idproxy.RefreshTokenData, error) {
+	if err := s.checkAvailable(ctx); err != nil {
+		return nil, err
+	}
+
+	pk := refreshTokenPK(id)
+
+	// Step 1: ConsistentRead で現在の data を取得
+	var current idproxy.RefreshTokenData
+	found, err := s.getItemJSON(ctx, pk, true, true, &current)
+	if err != nil {
+		return nil, fmt.Errorf("dynamodb store: consume refresh token (get): %w", err)
+	}
+	if !found {
+		// 未登録または期限切れ
+		return nil, nil
+	}
+
+	if current.Used {
+		// 既に消費済み
+		return &current, idproxy.ErrRefreshTokenAlreadyConsumed
+	}
+
+	// Step 2: atomic CAS で Used=true に更新
+	// ConditionExpression "attribute_exists(pk) AND used = :false" で
+	// 並行実行時に 1 つだけ成功することを保証する
+	current.Used = true
+	ttlUnix := current.ExpiresAt.UTC().Unix()
+
+	b, marshalErr := json.Marshal(&current)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("dynamodb store: consume refresh token (marshal): %w", marshalErr)
+	}
+
+	condExpr := "attribute_exists(pk) AND used = :false"
+	item := map[string]types.AttributeValue{
+		"pk":   stringAttr(pk),
+		"data": stringAttr(string(b)),
+		"ttl":  numberAttr(ttlUnix),
+		"used": &types.AttributeValueMemberBOOL{Value: true},
+	}
+
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           &s.tableName,
+		Item:                item,
+		ConditionExpression: &condExpr,
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":false": &types.AttributeValueMemberBOOL{Value: false},
+		},
+	})
+	if err != nil {
+		var condErr *types.ConditionalCheckFailedException
+		if errors.As(err, &condErr) {
+			// CAS 失敗: 他の goroutine が先に Used=true に更新した、または TTL で消えた
+			// 追加 GetItem で 2 パターンを区別する
+			var latest idproxy.RefreshTokenData
+			found2, getErr := s.getItemJSON(ctx, pk, true, true, &latest)
+			if getErr != nil {
+				return nil, fmt.Errorf("dynamodb store: consume refresh token (retry get): %w", getErr)
+			}
+			if !found2 {
+				// TTL で消えた = 未登録扱い (invalid_grant)
+				return nil, nil
+			}
+			// 別プロセスが先に Used=true に更新した = replay
+			return &latest, idproxy.ErrRefreshTokenAlreadyConsumed
+		}
+		return nil, fmt.Errorf("dynamodb store: consume refresh token (put): %w", err)
+	}
+
+	return &current, nil
+}
+
+// SetFamilyRevocation は familyID の tombstone レコードを保存する。
+// 存在することが revoked の意味であり、data は空でよい。
+func (s *DynamoDBStore) SetFamilyRevocation(ctx context.Context, familyID string, ttl time.Duration) error {
+	if err := s.checkAvailable(ctx); err != nil {
+		return err
+	}
+
+	// tombstone は data フィールドに空 JSON "{}" を保存する
+	type empty struct{}
+	if err := s.putItemJSON(ctx, familyRevokedPK(familyID), &empty{}, ttl); err != nil {
+		return fmt.Errorf("dynamodb store: set family revocation: %w", err)
+	}
+	return nil
+}
+
+// IsFamilyRevoked は familyID が tombstone として登録されているかを返す。
+// 未登録または期限切れの場合は false を返す。
+func (s *DynamoDBStore) IsFamilyRevoked(ctx context.Context, familyID string) (bool, error) {
+	if err := s.checkAvailable(ctx); err != nil {
+		return false, err
+	}
+
+	type empty struct{}
+	var e empty
+	found, err := s.getItemJSON(ctx, familyRevokedPK(familyID), true, true, &e)
+	if err != nil {
+		return false, fmt.Errorf("dynamodb store: is family revoked: %w", err)
+	}
+	return found, nil
 }
 
 // --- Cleanup / Close ---

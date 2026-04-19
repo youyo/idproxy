@@ -2,8 +2,13 @@ package idproxy
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrRefreshTokenAlreadyConsumed はリフレッシュトークンが既に消費済みの場合に返されるエラー。
+// replay 検知時は data と共に返される（familyID の取得に使用）。
+var ErrRefreshTokenAlreadyConsumed = errors.New("refresh token already consumed")
 
 // Store はセッション、認可コード、アクセストークンの永続化インターフェース。
 type Store interface {
@@ -26,6 +31,17 @@ type Store interface {
 	SetClient(ctx context.Context, clientID string, data *ClientData) error
 	GetClient(ctx context.Context, clientID string) (*ClientData, error)
 	DeleteClient(ctx context.Context, clientID string) error
+
+	// リフレッシュトークン操作（OAuth 2.1 rotation + replay detection 用）
+	SetRefreshToken(ctx context.Context, id string, data *RefreshTokenData, ttl time.Duration) error
+	GetRefreshToken(ctx context.Context, id string) (*RefreshTokenData, error)
+	// ConsumeRefreshToken はリフレッシュトークンを消費する。
+	// 未登録または期限切れ: (nil, nil)
+	// 初回消費: (data, nil) — Used フラグを true に更新
+	// 2回目以降: (data, ErrRefreshTokenAlreadyConsumed) — familyID 取得のため data も返す
+	ConsumeRefreshToken(ctx context.Context, id string) (*RefreshTokenData, error)
+	SetFamilyRevocation(ctx context.Context, familyID string, ttl time.Duration) error
+	IsFamilyRevoked(ctx context.Context, familyID string) (bool, error)
 
 	// クリーンアップ
 	Cleanup(ctx context.Context) error
@@ -115,6 +131,40 @@ type AccessTokenData struct {
 
 	// Revoked はトークンがリボケーション済みかどうか。
 	Revoked bool
+}
+
+// RefreshTokenData は OAuth 2.1 リフレッシュトークンに紐づくデータを保持する。
+// rotation + family tracking + replay detection に使用する。
+type RefreshTokenData struct {
+	// ID は opaque リフレッシュトークン文字列（32バイト base64url）。
+	ID string
+
+	// FamilyID は同一 authorization_code から派生した全リフレッシュトークンに共通の UUID v4。
+	FamilyID string
+
+	// ClientID は発行時の OAuth クライアントの ID。
+	ClientID string
+
+	// Subject はユーザーの OIDC sub クレーム。
+	Subject string
+
+	// Email はユーザーのメールアドレス（新 access_token 再発行用）。
+	Email string
+
+	// Name はユーザーの表示名（新 access_token 再発行用）。
+	Name string
+
+	// Scopes は付与されたスコープ。
+	Scopes []string
+
+	// IssuedAt はトークン発行日時。
+	IssuedAt time.Time
+
+	// ExpiresAt はトークン有効期限。
+	ExpiresAt time.Time
+
+	// Used は消費済みフラグ。ConsumeRefreshToken で true に更新される。
+	Used bool
 }
 
 // ClientData は動的登録されたクライアントの情報を保持する（RFC 7591）。

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,6 +31,12 @@ type OAuthServer struct {
 	keyID string
 	// sessionManager はセッション管理（/authorize でユーザー認証確認に使用）。
 	sessionManager *SessionManager
+	// accessTokenTTL は Access Token の有効期間。
+	accessTokenTTL time.Duration
+	// refreshTokenTTL は Refresh Token の有効期間。
+	refreshTokenTTL time.Duration
+	// logger は構造化ログ出力に使用する。
+	logger *slog.Logger
 }
 
 // NewOAuthServer は OAuthServer を構築する。
@@ -60,12 +67,30 @@ func NewOAuthServer(cfg Config, store Store, sm *SessionManager) (*OAuthServer, 
 	// keyID を公開鍵の SHA-256 サムプリントから生成
 	keyID := computeKeyID(&privateKey.PublicKey)
 
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	accessTokenTTL := cfg.AccessTokenTTL
+	if accessTokenTTL == 0 {
+		accessTokenTTL = time.Hour
+	}
+
+	refreshTokenTTL := cfg.RefreshTokenTTL
+	if refreshTokenTTL == 0 {
+		refreshTokenTTL = 30 * 24 * time.Hour
+	}
+
 	return &OAuthServer{
-		config:         cfg,
-		store:          store,
-		privateKey:     privateKey,
-		keyID:          keyID,
-		sessionManager: sm,
+		config:          cfg,
+		store:           store,
+		privateKey:      privateKey,
+		keyID:           keyID,
+		sessionManager:  sm,
+		accessTokenTTL:  accessTokenTTL,
+		refreshTokenTTL: refreshTokenTTL,
+		logger:          logger,
 	}, nil
 }
 
@@ -107,8 +132,8 @@ func (s *OAuthServer) metadataHandler(w http.ResponseWriter, r *http.Request) {
 		"registration_endpoint":                 baseURL + prefix + "/register",
 		"jwks_uri":                              baseURL + prefix + "/.well-known/jwks.json",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
-		"code_challenge_methods_supported":       []string{"S256"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      []string{"openid", "email", "profile"},
 	}
@@ -285,6 +310,8 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess, err := s.sessionManager.GetSessionFromRequest(r.Context(), r)
+	// 診断ログ: authorize リクエスト
+	s.logger.Info("oauth authorize", "client_id", clientID, "has_session", sess != nil)
 	if err != nil {
 		// Cookie が無効（改ざん等）: ログインへリダイレクト
 		s.redirectToLogin(w, r)
@@ -359,13 +386,8 @@ func (s *OAuthServer) authorizeError(w http.ResponseWriter, errorCode, descripti
 //
 // OAuth 2.1 Token Endpoint:
 //  1. Content-Type: application/x-www-form-urlencoded を検証
-//  2. grant_type = "authorization_code" を確認
-//  3. code, redirect_uri, client_id, code_verifier を取得
-//  4. Store から認可コードを取得・削除（一回使用制約）
-//  5. redirect_uri, client_id の一致検証
-//  6. PKCE 検証
-//  7. Access Token（JWT ES256）を生成・Store に保存
-//  8. JSON レスポンス返却
+//  2. grant_type = "authorization_code" または "refresh_token" に応じて処理
+//  3. それぞれの検証・発行処理を行い JSON レスポンスを返す
 func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -384,105 +406,184 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// grant_type 検証
 	grantType := r.PostFormValue("grant_type")
-	if grantType != "authorization_code" {
-		s.tokenError(w, "unsupported_grant_type", "grant_type must be 'authorization_code'", http.StatusBadRequest)
-		return
-	}
-
-	code := r.PostFormValue("code")
-	redirectURI := r.PostFormValue("redirect_uri")
 	clientID := r.PostFormValue("client_id")
-	codeVerifier := r.PostFormValue("code_verifier")
 
-	if code == "" {
-		s.tokenError(w, "invalid_request", "code is required", http.StatusBadRequest)
-		return
-	}
-	if redirectURI == "" {
-		s.tokenError(w, "invalid_request", "redirect_uri is required", http.StatusBadRequest)
-		return
-	}
-	if clientID == "" {
-		s.tokenError(w, "invalid_request", "client_id is required", http.StatusBadRequest)
-		return
-	}
-	if codeVerifier == "" {
-		s.tokenError(w, "invalid_request", "code_verifier is required", http.StatusBadRequest)
-		return
-	}
+	// 診断ログ
+	s.logger.Info("oauth token", "grant_type", grantType, "client_id", clientID)
 
+	switch grantType {
+	case "authorization_code":
+		code := r.PostFormValue("code")
+		redirectURI := r.PostFormValue("redirect_uri")
+		codeVerifier := r.PostFormValue("code_verifier")
+
+		if code == "" {
+			s.tokenError(w, "invalid_request", "code is required", http.StatusBadRequest)
+			return
+		}
+		if redirectURI == "" {
+			s.tokenError(w, "invalid_request", "redirect_uri is required", http.StatusBadRequest)
+			return
+		}
+		if clientID == "" {
+			s.tokenError(w, "invalid_request", "client_id is required", http.StatusBadRequest)
+			return
+		}
+		if codeVerifier == "" {
+			s.tokenError(w, "invalid_request", "code_verifier is required", http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+
+		// 認可コード取得
+		authCode, err := s.store.GetAuthCode(ctx, code)
+		if err != nil {
+			s.tokenError(w, "server_error", "failed to retrieve authorization code", http.StatusInternalServerError)
+			return
+		}
+		if authCode == nil {
+			s.tokenError(w, "invalid_grant", "authorization code not found", http.StatusBadRequest)
+			return
+		}
+
+		// 二重使用検出: Used フラグが true の場合
+		if authCode.Used {
+			// セキュリティ: 認可コードの二重使用はトークン漏洩の兆候
+			// 関連する全アクセストークンを無効化すべき（ここでは Store から削除）
+			s.tokenError(w, "invalid_grant", "authorization code has already been used", http.StatusBadRequest)
+			return
+		}
+
+		// 認可コードを使用済みとマーク（一回使用制約）
+		authCode.Used = true
+		codeTTL := authCode.ExpiresAt.Sub(authCode.CreatedAt)
+		if codeTTL <= 0 {
+			codeTTL = 5 * time.Minute
+		}
+		if err := s.store.SetAuthCode(ctx, code, authCode, codeTTL); err != nil {
+			s.tokenError(w, "server_error", "failed to update authorization code", http.StatusInternalServerError)
+			return
+		}
+
+		// 有効期限チェック
+		if time.Now().After(authCode.ExpiresAt) {
+			s.tokenError(w, "invalid_grant", "authorization code has expired", http.StatusBadRequest)
+			return
+		}
+
+		// redirect_uri, client_id の一致検証
+		if authCode.RedirectURI != redirectURI {
+			s.tokenError(w, "invalid_grant", "redirect_uri mismatch", http.StatusBadRequest)
+			return
+		}
+		if authCode.ClientID != clientID {
+			s.tokenError(w, "invalid_grant", "client_id mismatch", http.StatusBadRequest)
+			return
+		}
+
+		// PKCE 検証
+		if !VerifyS256(codeVerifier, authCode.CodeChallenge) {
+			s.tokenError(w, "invalid_grant", "PKCE verification failed", http.StatusBadRequest)
+			return
+		}
+
+		// ユーザー情報を取り出す
+		user := authCode.User
+		if user == nil {
+			user = &User{}
+		}
+
+		// access_token + refresh_token を発行して応答（新 family）
+		s.issueTokenResponse(w, r, user, authCode.Scopes, clientID, "")
+
+	case "refresh_token":
+		refreshToken := r.PostFormValue("refresh_token")
+		if refreshToken == "" {
+			s.tokenError(w, "invalid_request", "refresh_token is required", http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+
+		// refresh_token を消費
+		data, err := s.store.ConsumeRefreshToken(ctx, refreshToken)
+		if err != nil {
+			if errors.Is(err, ErrRefreshTokenAlreadyConsumed) {
+				// replay 検知: family tombstone を書き込む
+				if data != nil {
+					_ = s.store.SetFamilyRevocation(ctx, data.FamilyID, s.refreshTokenTTL)
+					s.logger.Warn("oauth refresh replay detected", "family_id", data.FamilyID, "client_id", data.ClientID)
+				}
+				s.tokenError(w, "invalid_grant", "refresh token has already been used", http.StatusBadRequest)
+				return
+			}
+			s.tokenError(w, "server_error", "failed to consume refresh token", http.StatusInternalServerError)
+			return
+		}
+		if data == nil {
+			// 未登録または TTL 切れ
+			s.tokenError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
+			return
+		}
+
+		// family revocation チェック
+		revoked, err := s.store.IsFamilyRevoked(ctx, data.FamilyID)
+		if err != nil {
+			s.tokenError(w, "server_error", "failed to check family revocation", http.StatusInternalServerError)
+			return
+		}
+		if revoked {
+			s.tokenError(w, "invalid_grant", "refresh token family has been revoked", http.StatusBadRequest)
+			return
+		}
+
+		// client_id チェック
+		if data.ClientID != clientID {
+			s.tokenError(w, "invalid_grant", "client_id mismatch", http.StatusBadRequest)
+			return
+		}
+
+		// ユーザー情報を再構築
+		user := &User{
+			Email:   data.Email,
+			Name:    data.Name,
+			Subject: data.Subject,
+		}
+
+		// 既存の familyID を引き継いで新 access_token + refresh_token を発行
+		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID)
+
+	default:
+		s.tokenError(w, "unsupported_grant_type", "unsupported grant_type", http.StatusBadRequest)
+	}
+}
+
+// issueTokenResponse は access_token + refresh_token を発行し応答を書く。
+// familyID が空文字列の場合は新規生成する（authorization_code 経路）。
+// 非空の場合は既存を引き継ぐ（refresh_token 経路）。
+func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request, user *User, scopes []string, clientID string, familyID string) {
 	ctx := r.Context()
 
-	// 認可コード取得
-	authCode, err := s.store.GetAuthCode(ctx, code)
-	if err != nil {
-		s.tokenError(w, "server_error", "failed to retrieve authorization code", http.StatusInternalServerError)
-		return
-	}
-	if authCode == nil {
-		s.tokenError(w, "invalid_grant", "authorization code not found", http.StatusBadRequest)
-		return
+	// familyID が空なら新規生成
+	if familyID == "" {
+		familyID = uuid.NewString()
 	}
 
-	// 二重使用検出: Used フラグが true の場合、関連トークンを無効化
-	if authCode.Used {
-		// セキュリティ: 認可コードの二重使用はトークン漏洩の兆候
-		// 関連する全アクセストークンを無効化すべき（ここでは Store から削除）
-		s.tokenError(w, "invalid_grant", "authorization code has already been used", http.StatusBadRequest)
-		return
-	}
-
-	// 認可コードを使用済みとマーク（一回使用制約）
-	authCode.Used = true
-	ttl := authCode.ExpiresAt.Sub(authCode.CreatedAt)
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
-	if err := s.store.SetAuthCode(ctx, code, authCode, ttl); err != nil {
-		s.tokenError(w, "server_error", "failed to update authorization code", http.StatusInternalServerError)
-		return
-	}
-
-	// 有効期限チェック
-	if time.Now().After(authCode.ExpiresAt) {
-		s.tokenError(w, "invalid_grant", "authorization code has expired", http.StatusBadRequest)
-		return
-	}
-
-	// redirect_uri, client_id の一致検証
-	if authCode.RedirectURI != redirectURI {
-		s.tokenError(w, "invalid_grant", "redirect_uri mismatch", http.StatusBadRequest)
-		return
-	}
-	if authCode.ClientID != clientID {
-		s.tokenError(w, "invalid_grant", "client_id mismatch", http.StatusBadRequest)
-		return
-	}
-
-	// PKCE 検証
-	if !VerifyS256(codeVerifier, authCode.CodeChallenge) {
-		s.tokenError(w, "invalid_grant", "PKCE verification failed", http.StatusBadRequest)
-		return
-	}
+	email := user.Email
+	sub := user.Subject
+	name := user.Name
 
 	// Access Token（JWT ES256）を生成
 	now := time.Now()
-	expiresAt := now.Add(time.Hour)
+	expiresAt := now.Add(s.accessTokenTTL)
 	jtiBytes := make([]byte, 16)
 	if _, err := rand.Read(jtiBytes); err != nil {
 		s.tokenError(w, "server_error", "failed to generate token ID", http.StatusInternalServerError)
 		return
 	}
 	jti := hex.EncodeToString(jtiBytes)
-
-	email := ""
-	sub := ""
-	if authCode.User != nil {
-		email = authCode.User.Email
-		sub = authCode.User.Subject
-	}
 
 	claims := jwt.MapClaims{
 		"jti":   jti,
@@ -509,21 +610,51 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		Subject:   sub,
 		Email:     email,
 		ClientID:  clientID,
-		Scopes:    authCode.Scopes,
+		Scopes:    scopes,
 		IssuedAt:  now,
 		ExpiresAt: expiresAt,
 		Revoked:   false,
 	}
-	if err := s.store.SetAccessToken(ctx, jti, tokenData, time.Hour); err != nil {
+	if err := s.store.SetAccessToken(ctx, jti, tokenData, s.accessTokenTTL); err != nil {
 		s.tokenError(w, "server_error", "failed to store access token", http.StatusInternalServerError)
 		return
 	}
 
+	// Refresh Token 生成（opaque 32バイト base64url）
+	rtBytes := make([]byte, 32)
+	if _, err := rand.Read(rtBytes); err != nil {
+		s.tokenError(w, "server_error", "failed to generate refresh token", http.StatusInternalServerError)
+		return
+	}
+	refreshTokenID := base64.RawURLEncoding.EncodeToString(rtBytes)
+
+	rtData := &RefreshTokenData{
+		ID:        refreshTokenID,
+		FamilyID:  familyID,
+		ClientID:  clientID,
+		Subject:   sub,
+		Email:     email,
+		Name:      name,
+		Scopes:    scopes,
+		IssuedAt:  now,
+		ExpiresAt: now.Add(s.refreshTokenTTL),
+		Used:      false,
+	}
+	if err := s.store.SetRefreshToken(ctx, refreshTokenID, rtData, s.refreshTokenTTL); err != nil {
+		s.tokenError(w, "server_error", "failed to store refresh token", http.StatusInternalServerError)
+		return
+	}
+
+	// expires_in を秒数で計算
+	expiresIn := int(s.accessTokenTTL.Seconds())
+
 	// レスポンス JSON
 	resp := map[string]any{
-		"access_token": tokenStr,
-		"token_type":   "Bearer",
-		"expires_in":   3600,
+		"access_token":  tokenStr,
+		"token_type":    "Bearer",
+		"expires_in":    expiresIn,
+		"refresh_token": refreshTokenID,
+		"scope":         strings.Join(scopes, " "),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -621,7 +752,7 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		ClientID:                clientID,
 		ClientName:              req.ClientName,
 		RedirectURIs:            req.RedirectURIs,
-		GrantTypes:              []string{"authorization_code"},
+		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "none",
 		Scope:                   req.Scope,
@@ -637,9 +768,9 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 	// レスポンス JSON（RFC 7591 準拠）
 	resp := map[string]any{
 		"client_id":                  clientData.ClientID,
-		"redirect_uris":             clientData.RedirectURIs,
-		"grant_types":               clientData.GrantTypes,
-		"response_types":            clientData.ResponseTypes,
+		"redirect_uris":              clientData.RedirectURIs,
+		"grant_types":                clientData.GrantTypes,
+		"response_types":             clientData.ResponseTypes,
 		"token_endpoint_auth_method": clientData.TokenEndpointAuthMethod,
 	}
 	if clientData.ClientName != "" {

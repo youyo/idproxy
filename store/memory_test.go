@@ -745,6 +745,340 @@ func TestMemoryStore_Cleanup_AllTypes(t *testing.T) {
 	}
 }
 
+// --- RefreshToken テスト ---
+
+func testRefreshTokenData() *idproxy.RefreshTokenData {
+	now := time.Now()
+	return &idproxy.RefreshTokenData{
+		ID:        "rt-opaque-001",
+		FamilyID:  "family-uuid-001",
+		ClientID:  "client-001",
+		Subject:   "sub-001",
+		Email:     "test@example.com",
+		Name:      "Test User",
+		Scopes:    []string{"openid", "profile"},
+		IssuedAt:  now,
+		ExpiresAt: now.Add(30 * 24 * time.Hour),
+		Used:      false,
+	}
+}
+
+// RT01: SetRefreshToken → GetRefreshToken で同一値が取得できること
+func TestMemoryStore_RT01_SetGetRefreshToken(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testRefreshTokenData()
+
+	if err := ms.SetRefreshToken(ctx, data.ID, data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	got, err := ms.GetRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("GetRefreshToken() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetRefreshToken() returned nil")
+	}
+	if got.ID != data.ID {
+		t.Errorf("ID = %q, want %q", got.ID, data.ID)
+	}
+	if got.FamilyID != data.FamilyID {
+		t.Errorf("FamilyID = %q, want %q", got.FamilyID, data.FamilyID)
+	}
+	if got.ClientID != data.ClientID {
+		t.Errorf("ClientID = %q, want %q", got.ClientID, data.ClientID)
+	}
+	if got.Subject != data.Subject {
+		t.Errorf("Subject = %q, want %q", got.Subject, data.Subject)
+	}
+	if got.Used {
+		t.Error("Used = true, want false")
+	}
+}
+
+// RT02: GetRefreshToken 未登録は (nil, nil)
+func TestMemoryStore_RT02_GetRefreshToken_NotFound(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	got, err := ms.GetRefreshToken(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetRefreshToken() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetRefreshToken() = %v, want nil", got)
+	}
+}
+
+// RT03: GetRefreshToken TTL 切れは (nil, nil)
+func TestMemoryStore_RT03_GetRefreshToken_Expired(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testRefreshTokenData()
+
+	if err := ms.SetRefreshToken(ctx, data.ID, data, time.Nanosecond); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+
+	got, err := ms.GetRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("GetRefreshToken() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("GetRefreshToken() = %v, want nil (expired)", got)
+	}
+}
+
+// RT04: ConsumeRefreshToken 初回消費 — Used=true に更新され、data が返る
+func TestMemoryStore_RT04_ConsumeRefreshToken_FirstConsume(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testRefreshTokenData()
+
+	if err := ms.SetRefreshToken(ctx, data.ID, data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	got, err := ms.ConsumeRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got == nil {
+		t.Fatal("ConsumeRefreshToken() returned nil")
+	}
+	if !got.Used {
+		t.Error("Used = false, want true (should be marked as used)")
+	}
+	if got.FamilyID != data.FamilyID {
+		t.Errorf("FamilyID = %q, want %q", got.FamilyID, data.FamilyID)
+	}
+
+	// Store 上のエントリも Used=true になっていること
+	stored, _ := ms.GetRefreshToken(ctx, data.ID)
+	if stored == nil {
+		t.Fatal("GetRefreshToken() after consume returned nil")
+	}
+	if !stored.Used {
+		t.Error("stored Used = false, want true after consume")
+	}
+}
+
+// RT05: ConsumeRefreshToken 2回目 — (data, ErrRefreshTokenAlreadyConsumed) が返る
+func TestMemoryStore_RT05_ConsumeRefreshToken_SecondConsume(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testRefreshTokenData()
+
+	if err := ms.SetRefreshToken(ctx, data.ID, data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	// 1回目の消費
+	got1, err := ms.ConsumeRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("first ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got1 == nil {
+		t.Fatal("first ConsumeRefreshToken() returned nil")
+	}
+
+	// 2回目の消費
+	got2, err := ms.ConsumeRefreshToken(ctx, data.ID)
+	if err == nil {
+		t.Fatal("second ConsumeRefreshToken() error = nil, want ErrRefreshTokenAlreadyConsumed")
+	}
+	if err != idproxy.ErrRefreshTokenAlreadyConsumed {
+		t.Errorf("second ConsumeRefreshToken() error = %v, want %v", err, idproxy.ErrRefreshTokenAlreadyConsumed)
+	}
+	if got2 == nil {
+		t.Fatal("second ConsumeRefreshToken() returned nil data, want data with FamilyID")
+	}
+	if got2.FamilyID != data.FamilyID {
+		t.Errorf("FamilyID = %q, want %q (for replay detection)", got2.FamilyID, data.FamilyID)
+	}
+}
+
+// RT06: ConsumeRefreshToken 未登録 — (nil, nil)
+func TestMemoryStore_RT06_ConsumeRefreshToken_NotFound(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	got, err := ms.ConsumeRefreshToken(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("ConsumeRefreshToken() = %v, want nil", got)
+	}
+}
+
+// RT07: ConsumeRefreshToken TTL 切れ — (nil, nil)
+func TestMemoryStore_RT07_ConsumeRefreshToken_Expired(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testRefreshTokenData()
+
+	if err := ms.SetRefreshToken(ctx, data.ID, data, time.Nanosecond); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+
+	got, err := ms.ConsumeRefreshToken(ctx, data.ID)
+	if err != nil {
+		t.Fatalf("ConsumeRefreshToken() error = %v, want nil", err)
+	}
+	if got != nil {
+		t.Errorf("ConsumeRefreshToken() = %v, want nil (expired)", got)
+	}
+}
+
+// RT08: SetFamilyRevocation → IsFamilyRevoked=true
+func TestMemoryStore_RT08_SetFamilyRevocation(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	familyID := "family-uuid-001"
+
+	if err := ms.SetFamilyRevocation(ctx, familyID, time.Hour); err != nil {
+		t.Fatalf("SetFamilyRevocation() error = %v", err)
+	}
+
+	revoked, err := ms.IsFamilyRevoked(ctx, familyID)
+	if err != nil {
+		t.Fatalf("IsFamilyRevoked() error = %v", err)
+	}
+	if !revoked {
+		t.Error("IsFamilyRevoked() = false, want true")
+	}
+}
+
+// RT09: 未設定 family → IsFamilyRevoked=false
+func TestMemoryStore_RT09_IsFamilyRevoked_NotSet(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+
+	revoked, err := ms.IsFamilyRevoked(ctx, "unknown-family")
+	if err != nil {
+		t.Fatalf("IsFamilyRevoked() error = %v", err)
+	}
+	if revoked {
+		t.Error("IsFamilyRevoked() = true, want false")
+	}
+}
+
+// RT10: SetFamilyRevocation TTL 切れ → IsFamilyRevoked=false
+func TestMemoryStore_RT10_IsFamilyRevoked_Expired(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	familyID := "family-uuid-expired"
+
+	if err := ms.SetFamilyRevocation(ctx, familyID, time.Nanosecond); err != nil {
+		t.Fatalf("SetFamilyRevocation() error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+
+	revoked, err := ms.IsFamilyRevoked(ctx, familyID)
+	if err != nil {
+		t.Fatalf("IsFamilyRevoked() error = %v", err)
+	}
+	if revoked {
+		t.Error("IsFamilyRevoked() = true, want false (expired)")
+	}
+}
+
+// RT11: ConsumeRefreshToken race condition — 複数 goroutine で同時消費、片方のみ成功
+func TestMemoryStore_RT11_ConsumeRefreshToken_Race(t *testing.T) {
+	ms := NewMemoryStore()
+	ctx := context.Background()
+	data := testRefreshTokenData()
+
+	if err := ms.SetRefreshToken(ctx, data.ID, data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	const goroutines = 20
+	results := make([]error, goroutines)
+	datas := make([]*idproxy.RefreshTokenData, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := range goroutines {
+		idx := i
+		go func() {
+			defer wg.Done()
+			d, err := ms.ConsumeRefreshToken(ctx, data.ID)
+			results[idx] = err
+			datas[idx] = d
+		}()
+	}
+	wg.Wait()
+
+	// 成功 (nil error) は1回のみ、残りは ErrRefreshTokenAlreadyConsumed または nil data (not found)
+	successCount := 0
+	alreadyConsumedCount := 0
+	for i, err := range results {
+		if err == nil && datas[i] != nil {
+			successCount++
+		} else if err == idproxy.ErrRefreshTokenAlreadyConsumed {
+			alreadyConsumedCount++
+			if datas[i] == nil {
+				t.Errorf("goroutine %d: ErrRefreshTokenAlreadyConsumed but data is nil, want data with FamilyID", i)
+			}
+		}
+	}
+
+	if successCount != 1 {
+		t.Errorf("successCount = %d, want 1 (only one goroutine should succeed)", successCount)
+	}
+}
+
+// --- Cleanup でリフレッシュトークン関連エントリが削除されること ---
+
+func TestMemoryStore_Cleanup_RemovesExpiredRefreshTokens(t *testing.T) {
+	ms := newTestMemoryStore()
+	defer ms.Close() //nolint:errcheck
+	ctx := context.Background()
+
+	_ = ms.SetRefreshToken(ctx, "rt-expired", testRefreshTokenData(), -time.Second)
+	_ = ms.SetRefreshToken(ctx, "rt-valid", testRefreshTokenData(), time.Hour)
+
+	if err := ms.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	got, _ := ms.GetRefreshToken(ctx, "rt-expired")
+	if got != nil {
+		t.Error("expired refresh token should be nil after Cleanup")
+	}
+	got, _ = ms.GetRefreshToken(ctx, "rt-valid")
+	if got == nil {
+		t.Error("valid refresh token should remain after Cleanup")
+	}
+}
+
+func TestMemoryStore_Cleanup_RemovesExpiredFamilyRevocations(t *testing.T) {
+	ms := newTestMemoryStore()
+	defer ms.Close() //nolint:errcheck
+	ctx := context.Background()
+
+	_ = ms.SetFamilyRevocation(ctx, "family-expired", -time.Second)
+	_ = ms.SetFamilyRevocation(ctx, "family-valid", time.Hour)
+
+	if err := ms.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	revoked, _ := ms.IsFamilyRevoked(ctx, "family-expired")
+	if revoked {
+		t.Error("expired family revocation should be removed after Cleanup")
+	}
+	revoked, _ = ms.IsFamilyRevoked(ctx, "family-valid")
+	if !revoked {
+		t.Error("valid family revocation should remain after Cleanup")
+	}
+}
+
 func TestMemoryStore_Close_Idempotent(t *testing.T) {
 	ms := NewMemoryStore()
 

@@ -4,6 +4,7 @@ package idproxy_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -15,11 +16,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	idproxy "github.com/youyo/idproxy"
-	"github.com/youyo/idproxy/store"
+	idpstore "github.com/youyo/idproxy/store"
 	"github.com/youyo/idproxy/testutil"
 )
 
@@ -95,7 +99,7 @@ func setupSSEUpstream(t *testing.T, events []string) *httptest.Server {
 func setupAuth(t *testing.T, mockIdP *testutil.MockIdP, opts ...func(*idproxy.Config)) (*httptest.Server, *idproxy.Config) {
 	t.Helper()
 
-	memStore := store.NewMemoryStore()
+	memStore := idpstore.NewMemoryStore()
 	t.Cleanup(func() { _ = memStore.Close() })
 
 	signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -174,7 +178,7 @@ func setupAuth(t *testing.T, mockIdP *testutil.MockIdP, opts ...func(*idproxy.Co
 func setupAuthWithSSEUpstream(t *testing.T, mockIdP *testutil.MockIdP, sseUpstream *httptest.Server) (*httptest.Server, *idproxy.Config) {
 	t.Helper()
 
-	memStore := store.NewMemoryStore()
+	memStore := idpstore.NewMemoryStore()
 	t.Cleanup(func() { _ = memStore.Close() })
 
 	signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -677,7 +681,7 @@ func TestIntegration_MultipleIdPs(t *testing.T) {
 	mockIdP1 := testutil.NewMockIdP(t)
 	mockIdP2 := testutil.NewMockIdP(t)
 
-	memStore := store.NewMemoryStore()
+	memStore := idpstore.NewMemoryStore()
 	t.Cleanup(func() { _ = memStore.Close() })
 
 	signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -958,7 +962,7 @@ func TestIntegration_MCPOAuthFullFlow(t *testing.T) {
 
 	// MockMCP を upstream とする Auth サーバーを構築
 	// setupAuthWithSSEUpstream と同じパターンで SSE プロキシを構成
-	memStore := store.NewMemoryStore()
+	memStore := idpstore.NewMemoryStore()
 	t.Cleanup(func() { _ = memStore.Close() })
 
 	signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -1345,4 +1349,279 @@ func postMCPMessage(t *testing.T, url, bearerToken string, id any, method string
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 202 for message, got %d: %s", resp.StatusCode, string(bodyBytes))
 	}
+}
+
+// --- T14: MemoryStore と DynamoDBStore の両方でリフレッシュトークンフローが同一挙動 ---
+
+// integrationFakeDynamoDBClient は integration テスト用のインメモリ DynamoDB クライアント実装。
+type integrationFakeDynamoDBClient struct {
+	mu    sync.Mutex
+	items map[string]map[string]types.AttributeValue
+}
+
+func newIntegrationFakeDynamoDBClient() *integrationFakeDynamoDBClient {
+	return &integrationFakeDynamoDBClient{
+		items: make(map[string]map[string]types.AttributeValue),
+	}
+}
+
+func (f *integrationFakeDynamoDBClient) GetItem(_ context.Context, params *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pkAttr, ok := params.Key["pk"]
+	if !ok {
+		return &dynamodb.GetItemOutput{}, nil
+	}
+	pkVal, ok := pkAttr.(*types.AttributeValueMemberS)
+	if !ok {
+		return &dynamodb.GetItemOutput{}, nil
+	}
+	item, exists := f.items[pkVal.Value]
+	if !exists {
+		return &dynamodb.GetItemOutput{}, nil
+	}
+	copied := make(map[string]types.AttributeValue, len(item))
+	for k, v := range item {
+		copied[k] = v
+	}
+	return &dynamodb.GetItemOutput{Item: copied}, nil
+}
+
+func (f *integrationFakeDynamoDBClient) PutItem(_ context.Context, params *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pkAttr, ok := params.Item["pk"]
+	if !ok {
+		return &dynamodb.PutItemOutput{}, nil
+	}
+	pkVal, ok := pkAttr.(*types.AttributeValueMemberS)
+	if !ok {
+		return &dynamodb.PutItemOutput{}, nil
+	}
+	// ConditionExpression の評価
+	if params.ConditionExpression != nil {
+		switch *params.ConditionExpression {
+		case "attribute_exists(pk)":
+			if _, exists := f.items[pkVal.Value]; !exists {
+				return nil, &types.ConditionalCheckFailedException{
+					Message: func() *string { s := "The conditional request failed"; return &s }(),
+				}
+			}
+		case "attribute_exists(pk) AND used = :false":
+			// pk が存在し、かつ top-level used 属性が false の場合のみ成功
+			existing, exists := f.items[pkVal.Value]
+			if !exists {
+				return nil, &types.ConditionalCheckFailedException{
+					Message: func() *string { s := "The conditional request failed"; return &s }(),
+				}
+			}
+			usedAttr, hasUsed := existing["used"]
+			if !hasUsed {
+				return nil, &types.ConditionalCheckFailedException{
+					Message: func() *string { s := "The conditional request failed"; return &s }(),
+				}
+			}
+			boolAttr, ok := usedAttr.(*types.AttributeValueMemberBOOL)
+			if !ok || boolAttr.Value {
+				return nil, &types.ConditionalCheckFailedException{
+					Message: func() *string { s := "The conditional request failed"; return &s }(),
+				}
+			}
+		}
+	}
+	copied := make(map[string]types.AttributeValue, len(params.Item))
+	for k, v := range params.Item {
+		copied[k] = v
+	}
+	f.items[pkVal.Value] = copied
+	return &dynamodb.PutItemOutput{}, nil
+}
+
+func (f *integrationFakeDynamoDBClient) DeleteItem(_ context.Context, params *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pkAttr, ok := params.Key["pk"]
+	if !ok {
+		return &dynamodb.DeleteItemOutput{}, nil
+	}
+	pkVal, ok := pkAttr.(*types.AttributeValueMemberS)
+	if !ok {
+		return &dynamodb.DeleteItemOutput{}, nil
+	}
+	delete(f.items, pkVal.Value)
+	return &dynamodb.DeleteItemOutput{}, nil
+}
+
+// setupOAuthServerForT14 は T14 用の OAuthServer を指定された Store で構築するヘルパー。
+func setupOAuthServerForT14(t *testing.T, st idproxy.Store) (*idproxy.OAuthServer, string) {
+	t.Helper()
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// 認可コードを Store に保存
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	// PKCE S256: SHA256(codeVerifier) の base64url
+	// = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+	codeChallenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+	code := "t14-auth-code-" + t.Name()
+
+	authCodeData := &idproxy.AuthCodeData{
+		Code:                code,
+		ClientID:            "t14-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid", "email"},
+		User: &idproxy.User{
+			Email:   "t14@example.com",
+			Name:    "T14 User",
+			Subject: "sub-t14",
+			Issuer:  "https://accounts.google.com",
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+		Used:      false,
+	}
+
+	ctx := context.Background()
+	if err := st.SetAuthCode(ctx, code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	cfg := idproxy.Config{
+		Providers: []idproxy.OIDCProvider{
+			{
+				Issuer:       "https://accounts.google.com",
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		Store:        st,
+		OAuth: &idproxy.OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "t14-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate(): %v", err)
+	}
+
+	srv, err := idproxy.NewOAuthServer(cfg, st, nil)
+	if err != nil {
+		t.Fatalf("NewOAuthServer(): %v", err)
+	}
+
+	return srv, codeVerifier
+}
+
+// runT14Flow は authorization_code → refresh → replay の一連フローを実行する。
+// MemoryStore と DynamoDBStore の両方で同一挙動になることを確認する。
+func runT14Flow(t *testing.T, srv *idproxy.OAuthServer, codeVerifier string) {
+	t.Helper()
+
+	// Step 1: authorization_code で token を取得
+	form1 := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"t14-auth-code-" + t.Name()},
+		"redirect_uri":  {"http://localhost:3000/callback"},
+		"client_id":     {"t14-client"},
+		"code_verifier": {codeVerifier},
+	}
+	req1 := httptest.NewRequest("POST", "/token", strings.NewReader(form1.Encode()))
+	req1.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("step1 (authorization_code): expected 200, got %d: %s", w1.Code, w1.Body.String())
+	}
+
+	var resp1 map[string]any
+	if err := json.NewDecoder(w1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("step1: decode response: %v", err)
+	}
+
+	refreshToken, ok := resp1["refresh_token"].(string)
+	if !ok || refreshToken == "" {
+		t.Fatal("step1: expected refresh_token in response")
+	}
+	if _, ok := resp1["access_token"].(string); !ok {
+		t.Fatal("step1: expected access_token in response")
+	}
+
+	// Step 2: refresh_token grant で新トークンを取得
+	form2 := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"t14-client"},
+	}
+	req2 := httptest.NewRequest("POST", "/token", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("step2 (refresh): expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	var resp2 map[string]any
+	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("step2: decode response: %v", err)
+	}
+
+	newRT, ok := resp2["refresh_token"].(string)
+	if !ok || newRT == "" {
+		t.Fatal("step2: expected new refresh_token")
+	}
+	if newRT == refreshToken {
+		t.Error("step2: new refresh_token should differ from old")
+	}
+
+	// Step 3: replay (旧 refresh_token を再送) → 400 invalid_grant
+	form3 := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"t14-client"},
+	}
+	req3 := httptest.NewRequest("POST", "/token", strings.NewReader(form3.Encode()))
+	req3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, req3)
+
+	if w3.Code != http.StatusBadRequest {
+		t.Fatalf("step3 (replay): expected 400, got %d: %s", w3.Code, w3.Body.String())
+	}
+
+	var errResp map[string]string
+	if err := json.NewDecoder(w3.Body).Decode(&errResp); err != nil {
+		t.Fatalf("step3: decode error response: %v", err)
+	}
+	if errResp["error"] != "invalid_grant" {
+		t.Errorf("step3: expected error 'invalid_grant', got %q", errResp["error"])
+	}
+}
+
+// T14: MemoryStore で authorization_code → refresh → replay フローを検証
+func TestIntegration_T14_RefreshFlow_MemoryStore(t *testing.T) {
+	st := idpstore.NewMemoryStore()
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv, codeVerifier := setupOAuthServerForT14(t, st)
+	runT14Flow(t, srv, codeVerifier)
+}
+
+// T14: DynamoDBStore（fake client）で authorization_code → refresh → replay フローを検証
+func TestIntegration_T14_RefreshFlow_DynamoDBStore(t *testing.T) {
+	fakeClient := newIntegrationFakeDynamoDBClient()
+	st := idpstore.NewDynamoDBStoreWithClient(fakeClient, "test-table")
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv, codeVerifier := setupOAuthServerForT14(t, st)
+	runT14Flow(t, srv, codeVerifier)
 }

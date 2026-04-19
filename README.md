@@ -9,7 +9,7 @@ idproxy sits in front of any HTTP backend and transparently provides OIDC browse
 ## Features
 
 - OIDC-based browser authentication (Google, Microsoft Entra ID, etc.)
-- OAuth 2.1 Authorization Server (PKCE required, Bearer Token issuance)
+- OAuth 2.1 Authorization Server (PKCE required, Bearer Token issuance, refresh_token rotation)
 - Dynamic Client Registration (RFC 7591)
 - SSE (Server-Sent Events) transparent proxy
 - Optimized for protecting MCP servers
@@ -186,9 +186,11 @@ func main() {
 				ClientSecret: "your-client-secret",
 			},
 		},
-		ExternalURL:  "https://mcp-auth.example.com",
-		CookieSecret: []byte("32-byte-secret-key-here-1234567"),
-		Store:        store.NewMemoryStore(),
+		ExternalURL:     "https://mcp-auth.example.com",
+		CookieSecret:    []byte("32-byte-secret-key-here-1234567"),
+		Store:           store.NewMemoryStore(),
+		AccessTokenTTL:  time.Hour,
+		RefreshTokenTTL: 30 * 24 * time.Hour, // 30 days
 		OAuth: &idproxy.OAuthConfig{
 			SigningKey: signingKey,
 		},

@@ -16,19 +16,29 @@ import (
 // testMemoryStore はテスト専用のシンプルな Store 実装。
 // store.MemoryStore は循環インポートになるため使用できない。
 type testMemoryStore struct {
-	mu           sync.RWMutex
-	sessions     map[string]*Session
-	authCodes    map[string]*AuthCodeData
-	accessTokens map[string]*AccessTokenData
-	clients      map[string]*ClientData
+	mu              sync.Mutex
+	sessions        map[string]*Session
+	authCodes       map[string]*AuthCodeData
+	accessTokens    map[string]*AccessTokenData
+	clients         map[string]*ClientData
+	refreshTokens   map[string]*refreshTokenEntry
+	familyRevoked   map[string]time.Time
+}
+
+// refreshTokenEntry はリフレッシュトークンと有効期限を保持する。
+type refreshTokenEntry struct {
+	data      RefreshTokenData
+	expiresAt time.Time
 }
 
 func newTestMemoryStore() *testMemoryStore {
 	return &testMemoryStore{
-		sessions:     make(map[string]*Session),
-		authCodes:    make(map[string]*AuthCodeData),
-		accessTokens: make(map[string]*AccessTokenData),
-		clients:      make(map[string]*ClientData),
+		sessions:      make(map[string]*Session),
+		authCodes:     make(map[string]*AuthCodeData),
+		accessTokens:  make(map[string]*AccessTokenData),
+		clients:       make(map[string]*ClientData),
+		refreshTokens: make(map[string]*refreshTokenEntry),
+		familyRevoked: make(map[string]time.Time),
 	}
 }
 
@@ -40,8 +50,8 @@ func (s *testMemoryStore) SetSession(_ context.Context, id string, session *Sess
 }
 
 func (s *testMemoryStore) GetSession(_ context.Context, id string) (*Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
 	if !ok {
 		return nil, nil
@@ -63,8 +73,8 @@ func (s *testMemoryStore) SetAuthCode(_ context.Context, code string, data *Auth
 	return nil
 }
 func (s *testMemoryStore) GetAuthCode(_ context.Context, code string) (*AuthCodeData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, ok := s.authCodes[code]
 	if !ok {
 		return nil, nil
@@ -84,8 +94,8 @@ func (s *testMemoryStore) SetAccessToken(_ context.Context, jti string, data *Ac
 	return nil
 }
 func (s *testMemoryStore) GetAccessToken(_ context.Context, jti string) (*AccessTokenData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, ok := s.accessTokens[jti]
 	if !ok {
 		return nil, nil
@@ -105,8 +115,8 @@ func (s *testMemoryStore) SetClient(_ context.Context, clientID string, data *Cl
 	return nil
 }
 func (s *testMemoryStore) GetClient(_ context.Context, clientID string) (*ClientData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, ok := s.clients[clientID]
 	if !ok {
 		return nil, nil
@@ -121,6 +131,83 @@ func (s *testMemoryStore) DeleteClient(_ context.Context, clientID string) error
 }
 func (s *testMemoryStore) Cleanup(_ context.Context) error { return nil }
 func (s *testMemoryStore) Close() error                    { return nil }
+
+// SetRefreshToken はリフレッシュトークンを保存する。
+func (s *testMemoryStore) SetRefreshToken(_ context.Context, id string, data *RefreshTokenData, ttl time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// deep copy して保存
+	d := *data
+	s.refreshTokens[id] = &refreshTokenEntry{
+		data:      d,
+		expiresAt: time.Now().Add(ttl),
+	}
+	return nil
+}
+
+// GetRefreshToken はリフレッシュトークンを取得する（Used フラグは変更しない）。
+func (s *testMemoryStore) GetRefreshToken(_ context.Context, id string) (*RefreshTokenData, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.refreshTokens[id]
+	if !ok {
+		return nil, nil
+	}
+	if time.Now().After(entry.expiresAt) {
+		return nil, nil
+	}
+	// コピーを返す
+	d := entry.data
+	return &d, nil
+}
+
+// ConsumeRefreshToken はリフレッシュトークンを消費する。
+// 未登録または期限切れ: (nil, nil)
+// 初回消費: (data, nil) — Used フラグを true に更新
+// 2回目以降: (data, ErrRefreshTokenAlreadyConsumed)
+func (s *testMemoryStore) ConsumeRefreshToken(_ context.Context, id string) (*RefreshTokenData, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.refreshTokens[id]
+	if !ok {
+		return nil, nil
+	}
+	if time.Now().After(entry.expiresAt) {
+		return nil, nil
+	}
+	if entry.data.Used {
+		// 既に消費済み: familyID 取得のためデータも返す
+		d := entry.data
+		return &d, ErrRefreshTokenAlreadyConsumed
+	}
+	// 初回消費: Used フラグを true に更新してから store に書き戻す
+	entry.data.Used = true
+	s.refreshTokens[id] = entry
+	d := entry.data
+	return &d, nil
+}
+
+// SetFamilyRevocation は family tombstone を書き込む。
+func (s *testMemoryStore) SetFamilyRevocation(_ context.Context, familyID string, ttl time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.familyRevoked[familyID] = time.Now().Add(ttl)
+	return nil
+}
+
+// IsFamilyRevoked は family が tombstone 済みかを返す。
+func (s *testMemoryStore) IsFamilyRevoked(_ context.Context, familyID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp, ok := s.familyRevoked[familyID]
+	if !ok {
+		return false, nil
+	}
+	if time.Now().After(exp) {
+		return false, nil
+	}
+	return true, nil
+}
 
 // --- ヘルパー関数 ---
 

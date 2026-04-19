@@ -49,6 +49,9 @@ type Config struct {
 	// デフォルト: 1時間。
 	AccessTokenTTL time.Duration
 
+	// RefreshTokenTTL は OAuth 2.1 Refresh Token の有効期間。デフォルト: 30日。
+	RefreshTokenTTL time.Duration
+
 	// AuthCodeTTL は認可コードの有効期間。
 	// デフォルト: 10分。
 	AuthCodeTTL time.Duration
@@ -108,10 +111,11 @@ type OAuthConfig struct {
 
 // DefaultConfig は Config のデフォルト値を保持する。
 var DefaultConfig = Config{
-	SessionMaxAge:  24 * time.Hour,
-	AccessTokenTTL: 1 * time.Hour,
-	AuthCodeTTL:    10 * time.Minute,
-	PathPrefix:     "",
+	SessionMaxAge:   24 * time.Hour,
+	AccessTokenTTL:  1 * time.Hour,
+	RefreshTokenTTL: 30 * 24 * time.Hour,
+	AuthCodeTTL:     10 * time.Minute,
+	PathPrefix:      "",
 }
 
 // DefaultScopes は OIDCProvider のデフォルトスコープ。
@@ -126,6 +130,9 @@ func (c *Config) Validate() error {
 	}
 	if c.AccessTokenTTL == 0 {
 		c.AccessTokenTTL = DefaultConfig.AccessTokenTTL
+	}
+	if c.RefreshTokenTTL == 0 {
+		c.RefreshTokenTTL = DefaultConfig.RefreshTokenTTL
 	}
 	if c.AuthCodeTTL == 0 {
 		c.AuthCodeTTL = DefaultConfig.AuthCodeTTL

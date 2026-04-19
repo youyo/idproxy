@@ -27,13 +27,15 @@ func (e *memoryEntry[T]) isExpired() bool {
 // MemoryStore はインメモリの Store 実装。
 // シングルインスタンス環境とテスト用途に適する。
 type MemoryStore struct {
-	mu           sync.RWMutex
-	sessions     map[string]*memoryEntry[idproxy.Session]
-	authCodes    map[string]*memoryEntry[idproxy.AuthCodeData]
-	accessTokens map[string]*memoryEntry[idproxy.AccessTokenData]
-	clients      map[string]*idproxy.ClientData
-	stopCh       chan struct{}
-	closeOnce    sync.Once
+	mu            sync.RWMutex
+	sessions      map[string]*memoryEntry[idproxy.Session]
+	authCodes     map[string]*memoryEntry[idproxy.AuthCodeData]
+	accessTokens  map[string]*memoryEntry[idproxy.AccessTokenData]
+	clients       map[string]*idproxy.ClientData
+	refreshTokens map[string]*memoryEntry[idproxy.RefreshTokenData]
+	familyRevoked map[string]*memoryEntry[struct{}]
+	stopCh        chan struct{}
+	closeOnce     sync.Once
 }
 
 // NewMemoryStore は新しい MemoryStore を生成し、バックグラウンドクリーンアップ goroutine を起動する。
@@ -45,11 +47,13 @@ func NewMemoryStore() *MemoryStore {
 // interval が 0 以下の場合は goroutine を起動しない（テスト用途）。
 func newMemoryStoreWithInterval(interval time.Duration) *MemoryStore {
 	m := &MemoryStore{
-		sessions:     make(map[string]*memoryEntry[idproxy.Session]),
-		authCodes:    make(map[string]*memoryEntry[idproxy.AuthCodeData]),
-		accessTokens: make(map[string]*memoryEntry[idproxy.AccessTokenData]),
-		clients:      make(map[string]*idproxy.ClientData),
-		stopCh:       make(chan struct{}),
+		sessions:      make(map[string]*memoryEntry[idproxy.Session]),
+		authCodes:     make(map[string]*memoryEntry[idproxy.AuthCodeData]),
+		accessTokens:  make(map[string]*memoryEntry[idproxy.AccessTokenData]),
+		clients:       make(map[string]*idproxy.ClientData),
+		refreshTokens: make(map[string]*memoryEntry[idproxy.RefreshTokenData]),
+		familyRevoked: make(map[string]*memoryEntry[struct{}]),
+		stopCh:        make(chan struct{}),
 	}
 	if interval > 0 {
 		go m.cleanupLoop(interval)
@@ -289,7 +293,129 @@ func (m *MemoryStore) Cleanup(_ context.Context) error {
 			delete(m.accessTokens, k)
 		}
 	}
+	for k, e := range m.refreshTokens {
+		if e.isExpired() {
+			delete(m.refreshTokens, k)
+		}
+	}
+	for k, e := range m.familyRevoked {
+		if e.isExpired() {
+			delete(m.familyRevoked, k)
+		}
+	}
 	return nil
+}
+
+// --- RefreshToken 操作 ---
+
+// SetRefreshToken はリフレッシュトークンを保存する。同一 ID が存在する場合は上書きする。
+func (m *MemoryStore) SetRefreshToken(ctx context.Context, id string, data *idproxy.RefreshTokenData, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.refreshTokens[id] = &memoryEntry[idproxy.RefreshTokenData]{
+		value:     data,
+		expiresAt: time.Now().Add(ttl),
+	}
+	return nil
+}
+
+// GetRefreshToken はリフレッシュトークンを取得する。
+// 存在しない場合または期限切れの場合は nil, nil を返す。
+func (m *MemoryStore) GetRefreshToken(ctx context.Context, id string) (*idproxy.RefreshTokenData, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	entry, ok := m.refreshTokens[id]
+	if !ok {
+		return nil, nil
+	}
+	if entry.isExpired() {
+		return nil, nil
+	}
+	return entry.value, nil
+}
+
+// ConsumeRefreshToken はリフレッシュトークンを消費する。
+// W-Lock 下で「Get → Used 確認 → Used=true に更新 → コピー返却」を atomic に実行する。
+//
+// 振る舞い:
+//   - 未登録または期限切れ: (nil, nil)
+//   - 初回消費 (Used=false): Used=true に更新し (data, nil) を返す
+//   - 2回目以降 (Used=true): (data, idproxy.ErrRefreshTokenAlreadyConsumed) を返す
+func (m *MemoryStore) ConsumeRefreshToken(ctx context.Context, id string) (*idproxy.RefreshTokenData, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entry, ok := m.refreshTokens[id]
+	if !ok {
+		return nil, nil
+	}
+	if entry.isExpired() {
+		return nil, nil
+	}
+
+	// データのコピーを作成して返す
+	dataCopy := *entry.value
+
+	if entry.value.Used {
+		// 既に消費済み: data を返し ErrRefreshTokenAlreadyConsumed も返す
+		return &dataCopy, idproxy.ErrRefreshTokenAlreadyConsumed
+	}
+
+	// 初回消費: Used=true に更新
+	entry.value.Used = true
+	dataCopy.Used = true
+	return &dataCopy, nil
+}
+
+// SetFamilyRevocation は familyID の tombstone レコードを保存する。
+// 存在することが revoked の意味であり、data は空の struct{} で十分。
+func (m *MemoryStore) SetFamilyRevocation(ctx context.Context, familyID string, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.familyRevoked[familyID] = &memoryEntry[struct{}]{
+		value:     &struct{}{},
+		expiresAt: time.Now().Add(ttl),
+	}
+	return nil
+}
+
+// IsFamilyRevoked は familyID が tombstone として登録されているかを返す。
+// 未登録または期限切れの場合は false を返す。
+func (m *MemoryStore) IsFamilyRevoked(ctx context.Context, familyID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	entry, ok := m.familyRevoked[familyID]
+	if !ok {
+		return false, nil
+	}
+	if entry.isExpired() {
+		return false, nil
+	}
+	return true, nil
 }
 
 // Close はバックグラウンドクリーンアップ goroutine を停止する。

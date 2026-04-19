@@ -68,6 +68,26 @@ func (m *mockStore) Close() error {
 	return nil
 }
 
+func (m *mockStore) SetRefreshToken(_ context.Context, _ string, _ *RefreshTokenData, _ time.Duration) error {
+	return nil
+}
+
+func (m *mockStore) GetRefreshToken(_ context.Context, _ string) (*RefreshTokenData, error) {
+	return nil, nil
+}
+
+func (m *mockStore) ConsumeRefreshToken(_ context.Context, _ string) (*RefreshTokenData, error) {
+	return nil, nil
+}
+
+func (m *mockStore) SetFamilyRevocation(_ context.Context, _ string, _ time.Duration) error {
+	return nil
+}
+
+func (m *mockStore) IsFamilyRevoked(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+
 func TestMockStoreImplementsStore(t *testing.T) {
 	var _ Store = &mockStore{}
 }
