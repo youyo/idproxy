@@ -552,6 +552,13 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 			Subject: data.Subject,
 		}
 
+		// rotation 成功ログ（replay 検知ログと対称）
+		s.logger.Info("oauth refresh rotation",
+			"family_id", data.FamilyID,
+			"client_id", data.ClientID,
+			"scope", strings.Join(data.Scopes, " "),
+		)
+
 		// 既存の familyID を引き継いで新 access_token + refresh_token を発行
 		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID)
 

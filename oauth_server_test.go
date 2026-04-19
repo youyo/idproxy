@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2109,6 +2110,182 @@ func TestToken_RefreshGrant_StoreState(t *testing.T) {
 	// 両者の FamilyID が同一
 	if oldData.FamilyID != newData.FamilyID {
 		t.Errorf("expected same FamilyID, old=%q new=%q", oldData.FamilyID, newData.FamilyID)
+	}
+}
+
+// setupTokenServerWithCapturedLogger は captured logger を注入した OAuthServer を構築し、
+// refresh_token 発行までを完走するヘルパー。v0.3.1 rotation ログ検証テスト用。
+// 返り値: (*OAuthServer, *testMemoryStore, refreshToken string, accessToken string)
+func setupTokenServerWithCapturedLogger(t *testing.T, logger *slog.Logger) (*OAuthServer, *testMemoryStore, string, string) {
+	t.Helper()
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate ECDSA key: %v", err)
+	}
+
+	st := newTestMemoryStore()
+
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{
+				Issuer:       "https://accounts.google.com",
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		PathPrefix:   "",
+		Store:        st,
+		Logger:       logger,
+		OAuth: &OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "test-oauth-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback", "https://app.example.com/callback"},
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate() failed: %v", err)
+	}
+
+	sm, err := NewSessionManager(cfg)
+	if err != nil {
+		t.Fatalf("NewSessionManager() failed: %v", err)
+	}
+
+	srv, err := NewOAuthServer(cfg, st, sm)
+	if err != nil {
+		t.Fatalf("NewOAuthServer() failed: %v", err)
+	}
+
+	// authorization_code を Store に事前保存
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	codeChallenge := S256Challenge(codeVerifier)
+	code := "test-auth-code-1234567890abcdef"
+	authCodeData := &AuthCodeData{
+		Code:                code,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User: &User{
+			Email:   "test@example.com",
+			Name:    "Test User",
+			Subject: "sub-123",
+			Issuer:  "https://accounts.google.com",
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+		Used:      false,
+	}
+	ctx := context.Background()
+	if err := st.SetAuthCode(ctx, code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	// authorization_code を refresh_token に交換
+	form := validTokenForm(code)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorization_code exchange failed: %d %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode token response: %v", err)
+	}
+	rt, ok := resp["refresh_token"].(string)
+	if !ok || rt == "" {
+		t.Fatal("refresh_token not found in authorization_code response")
+	}
+	at, _ := resp["access_token"].(string)
+	return srv, st, rt, at
+}
+
+// T5-L: refresh_token rotation 成功時に "oauth refresh rotation" ログが出力される (v0.3.1)
+func TestToken_RefreshGrant_RotationLog(t *testing.T) {
+	// captured logger をセットアップ
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	srv, _, oldRT, _ := setupTokenServerWithCapturedLogger(t, logger)
+
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {oldRT},
+		"client_id":     {"test-oauth-client"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// captured ログから "oauth refresh rotation" メッセージを持つ JSON 行を検索
+	var found map[string]any
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry["msg"] == "oauth refresh rotation" {
+			found = entry
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected \"oauth refresh rotation\" log, got: %s", buf.String())
+	}
+
+	// 必須フィールド検証
+	if _, ok := found["family_id"].(string); !ok {
+		t.Error("log should include family_id")
+	}
+	if cid, _ := found["client_id"].(string); cid != "test-oauth-client" {
+		t.Errorf("expected client_id=test-oauth-client, got %v", found["client_id"])
+	}
+	if _, ok := found["scope"].(string); !ok {
+		t.Error("log should include scope")
+	}
+}
+
+// T5-L-sec: rotation ログに refresh_token 文字列そのものが含まれないこと (v0.3.1)
+func TestToken_RefreshGrant_RotationLog_NoTokenLeak(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	srv, _, oldRT, _ := setupTokenServerWithCapturedLogger(t, logger)
+
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {oldRT},
+		"client_id":     {"test-oauth-client"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// ログ全体に refresh_token 文字列が含まれないこと
+	if strings.Contains(buf.String(), oldRT) {
+		t.Errorf("log must not contain the refresh_token string; log=%s", buf.String())
 	}
 }
 
