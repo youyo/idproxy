@@ -355,4 +355,3 @@ func generateRandomHex(n int) (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
-

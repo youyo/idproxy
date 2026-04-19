@@ -194,8 +194,8 @@ func (pm *ProviderManager) SelectionHTML() string {
 
 // knownIssuers は既知の OIDC Issuer ホスト名から表示名へのマッピング。
 var knownIssuers = map[string]string{
-	"accounts.google.com":         "Google",
-	"login.microsoftonline.com":   "Microsoft",
+	"accounts.google.com":       "Google",
+	"login.microsoftonline.com": "Microsoft",
 }
 
 // resolveProviderName は OIDCProvider の表示名を解決する。
