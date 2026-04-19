@@ -2445,9 +2445,10 @@ func TestToken_RefreshGrant_Concurrent(t *testing.T) {
 	ok200 := 0
 	ok400 := 0
 	for _, c := range codes {
-		if c == http.StatusOK {
+		switch c {
+		case http.StatusOK:
 			ok200++
-		} else if c == http.StatusBadRequest {
+		case http.StatusBadRequest:
 			ok400++
 		}
 	}
