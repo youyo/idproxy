@@ -210,6 +210,48 @@ func main() {
 }
 ```
 
+## Refresh Token Rotation Design
+
+idproxy implements OAuth 2.1 §4.3.2 refresh_token rotation with the following design:
+
+- When a refresh_token is consumed, the old record is **marked as `used=true`** instead of being deleted.
+- A new refresh_token is issued and linked to the same `family_id`.
+- If an already-used refresh_token is presented again (replay), the entire family is revoked via a `familyrevoked:<family_id>` tombstone.
+
+### Why keep the old record instead of deleting it?
+
+OAuth 2.1 §4.3.2 requires the AS to "invalidate" the old refresh_token, not literally "delete" it. Keeping the record with `used=true`:
+
+- Lets `ConsumeRefreshToken` reject reuse (satisfying the spec).
+- Retains the `family_id` so replay detection can revoke the whole family.
+- Expires automatically via TTL (30 days by default).
+
+### Observability
+
+Two structured log events cover the rotation lifecycle:
+
+| Event | Level | When |
+|-------|-------|------|
+| `oauth refresh rotation` | Info | Successful rotation (new token issued) |
+| `oauth refresh replay detected` | Warn | Reused token detected (family revoked) |
+
+Both include `family_id`, `client_id`, and `scope` — never the refresh_token string itself.
+
+### Observing rotation in production (DynamoDB)
+
+When inspecting `refreshtoken:*` records, include the `used` attribute to distinguish live vs. already-rotated tokens:
+
+```bash
+aws dynamodb scan \
+  --table-name my-idproxy-table \
+  --filter-expression 'begins_with(pk, :prefix)' \
+  --expression-attribute-values '{":prefix":{"S":"refreshtoken:"}}' \
+  --projection-expression 'pk, #u, #t' \
+  --expression-attribute-names '{"#u":"used","#t":"ttl"}'
+```
+
+`used=true` indicates the token has been rotated; it will be deleted by TTL.
+
 ## DynamoDB Store
 
 For multi-instance deployments (e.g., AWS Lambda with multiple concurrent containers), use `DynamoDBStore` to share state across instances.

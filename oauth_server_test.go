@@ -2233,7 +2233,7 @@ func TestToken_RefreshGrant_RotationLog(t *testing.T) {
 
 	// captured ログから "oauth refresh rotation" メッセージを持つ JSON 行を検索
 	var found map[string]any
-	for _, line := range strings.Split(buf.String(), "\n") {
+	for line := range strings.SplitSeq(buf.String(), "\n") {
 		if line == "" {
 			continue
 		}

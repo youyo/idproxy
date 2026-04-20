@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.1] - 2026-04-20
+
+### Added
+
+- feat(oauth): refresh_token rotation の可観測性向上
+  - rotation 成功時に `slog.Info("oauth refresh rotation", "family_id", ..., "client_id", ..., "scope", ...)` を出力
+  - 既存の replay 検知ログ `slog.Warn("oauth refresh replay detected", ...)` と対称なイベントペアを形成
+  - refresh_token 文字列はログに含めない（テストで強制）
+
+### Changed
+
+- docs: refresh_token rotation の設計意図（`Used=true` 方式採用理由）を README / README_ja / CLAUDE.md に明文化
+  - OAuth 2.1 §4.3.2 "MUST invalidate" を「delete」ではなく「mark as used」で満たす設計
+  - replay 検知時に `FamilyID` を取り出して family 全体を revoke するため旧トークンレコードを保持
+  - 本番 DynamoDB 観察時に `used` 属性を projection する運用手順を追記
+
+### Notes
+
+- **挙動変更なし** — ログ追加とドキュメント明文化のみ
+- 既存 refresh_token テスト（T5 / T8 / T12 等）に回帰なし
+
 ## [v0.3.0] - 2026-04-19
 
 ### Added

@@ -208,6 +208,48 @@ func main() {
 }
 ```
 
+## リフレッシュトークン Rotation の設計方針
+
+idproxy は OAuth 2.1 §4.3.2 に準拠した refresh_token rotation を以下の設計で実装しています:
+
+- refresh_token が消費されると、旧レコードは削除せず **`used=true` フラグを立てる**
+- 新 refresh_token を発行し、同一 `family_id` に紐付ける
+- 使用済み refresh_token が再度提示された場合（replay）は `familyrevoked:<family_id>` tombstone で family 全体を無効化
+
+### なぜ削除せず `used=true` マークなのか
+
+OAuth 2.1 §4.3.2 は旧 refresh_token の "invalidate" を要求していますが、これは "delete" ではありません。`used=true` マーク方式には以下の利点があります:
+
+- `ConsumeRefreshToken` が再利用を拒否（仕様を満たす）
+- `family_id` を保持することで replay 検知時に family 全体を revoke 可能
+- TTL（デフォルト 30 日）により自動削除
+
+### 可観測性
+
+rotation ライフサイクルは 2 つの構造化ログイベントでカバーされます:
+
+| イベント | レベル | タイミング |
+|---------|--------|-----------|
+| `oauth refresh rotation` | Info | rotation 成功時（新 token 発行） |
+| `oauth refresh replay detected` | Warn | 再利用検知時（family revoke） |
+
+両者とも `family_id` / `client_id` / `scope` を含み、refresh_token 文字列そのものは**決して含めません**。
+
+### 本番 DynamoDB での rotation 観察
+
+`refreshtoken:*` レコードを scan する際は `used` 属性を projection に含めることで、live なトークンと rotation 済みトークンを区別できます:
+
+```bash
+aws dynamodb scan \
+  --table-name my-idproxy-table \
+  --filter-expression 'begins_with(pk, :prefix)' \
+  --expression-attribute-values '{":prefix":{"S":"refreshtoken:"}}' \
+  --projection-expression 'pk, #u, #t' \
+  --expression-attribute-names '{"#u":"used","#t":"ttl"}'
+```
+
+`used=true` は rotation 済みを示し、TTL により自動削除されます。
+
 ## DynamoDB Store
 
 AWS Lambda のマルチコンテナ環境など、複数インスタンスで状態を共有する必要がある場合は `DynamoDBStore` を使用します。
