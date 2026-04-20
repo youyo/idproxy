@@ -32,3 +32,6 @@ Thumbs.db
 
 # Claude Code
 .claude/worktrees/
+
+# Serena (semantic code tool local state)
+.serena/
