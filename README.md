@@ -252,6 +252,36 @@ aws dynamodb scan \
 
 `used=true` indicates the token has been rotated; it will be deleted by TTL.
 
+## Store Backends
+
+idproxy persists sessions, authorization codes, access/refresh tokens and dynamically registered clients via the `Store` interface. Several implementations are bundled:
+
+| Backend | Package | Use case | TTL strategy | CAS for refresh rotation |
+|---|---|---|---|---|
+| Memory | `store` (`NewMemoryStore`) | Single-instance / dev / tests | In-process timer + Cleanup goroutine | Mutex |
+| DynamoDB | `store` (`NewDynamoDBStore`) | AWS multi-container (Lambda) | DynamoDB TTL | `ConditionExpression` |
+| SQLite | `store/sqlite` (`sqlite.New`) | Single-node file-based persistence (CGO-free) | Per-row `expires_at` + 5-min Cleanup goroutine | `BEGIN IMMEDIATE` + `used=0` CAS |
+| Redis | `store/redis` (`redis.New`) | General-purpose distributed KV | Native `EX` | Embedded Lua script (`consume.lua`) |
+| Momento | `store/momento` (`momento.New`) | Serverless distributed cache | Native TTL | `SetIfEqual` |
+
+When using the `idproxy` standalone binary, select a backend via the `STORE_BACKEND` environment variable. See the binary's `--help` or the [cmd/idproxy](cmd/idproxy) sources for required env vars per backend.
+
+### Selecting from the binary
+
+```sh
+# SQLite
+STORE_BACKEND=sqlite SQLITE_PATH=/var/lib/idproxy/state.db idproxy
+
+# Redis
+STORE_BACKEND=redis REDIS_ADDR=redis.internal:6379 idproxy
+
+# Momento
+STORE_BACKEND=momento MOMENTO_AUTH_TOKEN=... MOMENTO_CACHE_NAME=idproxy idproxy
+
+# DynamoDB
+STORE_BACKEND=dynamodb DYNAMODB_TABLE_NAME=my-idproxy-table AWS_REGION=ap-northeast-1 idproxy
+```
+
 ## DynamoDB Store
 
 For multi-instance deployments (e.g., AWS Lambda with multiple concurrent containers), use `DynamoDBStore` to share state across instances.

@@ -5,10 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	idproxy "github.com/youyo/idproxy"
 	"github.com/youyo/idproxy/store"
+	momentostore "github.com/youyo/idproxy/store/momento"
+	redisstore "github.com/youyo/idproxy/store/redis"
+	sqlitestore "github.com/youyo/idproxy/store/sqlite"
 )
 
 // parseConfig builds Config, upstream URL, and listenAddr from environment variables.
@@ -105,8 +110,13 @@ func parseConfig() (idproxy.Config, string, string, error) {
 	}
 	listenAddr := ":" + port
 
-	// Store (default: MemoryStore)
-	cfg.Store = store.NewMemoryStore()
+	// Store (STORE_BACKEND で切替。デフォルトは memory)
+	s, storeErr := loadStore()
+	if storeErr != nil {
+		errs = append(errs, storeErr.Error())
+	} else {
+		cfg.Store = s
+	}
 
 	// OAUTH_CLIENT_ID / OAUTH_ALLOWED_REDIRECT_URIS (optional)
 	// Note: OAuth AS is not enabled without JWT_SIGNING_KEY_FILE
@@ -118,6 +128,85 @@ func parseConfig() (idproxy.Config, string, string, error) {
 	}
 
 	return cfg, upstream, listenAddr, nil
+}
+
+// loadStore は STORE_BACKEND 環境変数を見て idproxy.Store 実装を生成する。
+// サポートする値: memory(default) / dynamodb / sqlite / redis / momento
+func loadStore() (idproxy.Store, error) {
+	backend := strings.ToLower(strings.TrimSpace(os.Getenv("STORE_BACKEND")))
+	if backend == "" {
+		backend = "memory"
+	}
+	switch backend {
+	case "memory":
+		return store.NewMemoryStore(), nil
+
+	case "dynamodb":
+		table := os.Getenv("DYNAMODB_TABLE_NAME")
+		region := os.Getenv("AWS_REGION")
+		if table == "" {
+			return nil, fmt.Errorf("STORE_BACKEND=dynamodb requires DYNAMODB_TABLE_NAME")
+		}
+		if region == "" {
+			return nil, fmt.Errorf("STORE_BACKEND=dynamodb requires AWS_REGION")
+		}
+		return store.NewDynamoDBStore(table, region)
+
+	case "sqlite":
+		path := os.Getenv("SQLITE_PATH")
+		if path == "" {
+			path = ":memory:"
+		}
+		return sqlitestore.New(path)
+
+	case "redis":
+		addr := os.Getenv("REDIS_ADDR")
+		if addr == "" {
+			return nil, fmt.Errorf("STORE_BACKEND=redis requires REDIS_ADDR")
+		}
+		dbNum := 0
+		if v := os.Getenv("REDIS_DB"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return nil, fmt.Errorf("REDIS_DB: %w", err)
+			}
+			dbNum = n
+		}
+		tls := strings.EqualFold(os.Getenv("REDIS_TLS"), "true")
+		return redisstore.New(redisstore.Options{
+			Addr:      addr,
+			Password:  os.Getenv("REDIS_PASSWORD"),
+			DB:        dbNum,
+			TLS:       tls,
+			KeyPrefix: os.Getenv("REDIS_KEY_PREFIX"),
+		})
+
+	case "momento":
+		token := os.Getenv("MOMENTO_AUTH_TOKEN")
+		cacheName := os.Getenv("MOMENTO_CACHE_NAME")
+		if token == "" {
+			return nil, fmt.Errorf("STORE_BACKEND=momento requires MOMENTO_AUTH_TOKEN")
+		}
+		if cacheName == "" {
+			return nil, fmt.Errorf("STORE_BACKEND=momento requires MOMENTO_CACHE_NAME")
+		}
+		var defaultTTL time.Duration
+		if v := os.Getenv("MOMENTO_DEFAULT_TTL"); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return nil, fmt.Errorf("MOMENTO_DEFAULT_TTL: %w", err)
+			}
+			defaultTTL = d
+		}
+		return momentostore.New(momentostore.Options{
+			AuthToken:  token,
+			CacheName:  cacheName,
+			DefaultTTL: defaultTTL,
+		})
+
+	default:
+		return nil, fmt.Errorf("STORE_BACKEND %q not supported (allowed: memory, dynamodb, sqlite, redis, momento)", backend)
+	}
 }
 
 // splitTrim splits a comma-separated string and trims whitespace from each element.
@@ -161,5 +250,27 @@ Environment Variables:
     ALLOWED_EMAILS        Allowed email addresses (comma-separated)
     PATH_PREFIX           OAuth 2.1 AS endpoint path prefix
     PORT                  Listen port (default: 8080)
+
+  Store backend (optional, default: memory):
+    STORE_BACKEND         Store backend: memory (default) | dynamodb | sqlite | redis | momento
+
+    For STORE_BACKEND=dynamodb:
+      DYNAMODB_TABLE_NAME   DynamoDB table name (required)
+      AWS_REGION            AWS region (required, e.g. us-east-1)
+
+    For STORE_BACKEND=sqlite:
+      SQLITE_PATH           SQLite database file path (default: :memory:)
+
+    For STORE_BACKEND=redis:
+      REDIS_ADDR            Redis host:port (required, e.g. localhost:6379)
+      REDIS_PASSWORD        Redis password (optional)
+      REDIS_DB              Redis DB number (optional, default: 0)
+      REDIS_TLS             "true" to enable TLS (optional)
+      REDIS_KEY_PREFIX      Key prefix (optional, e.g. "idproxy:")
+
+    For STORE_BACKEND=momento:
+      MOMENTO_AUTH_TOKEN    Momento auth token (required)
+      MOMENTO_CACHE_NAME    Momento cache name (required, must exist)
+      MOMENTO_DEFAULT_TTL   Default TTL for client records (e.g. "24h", default: 24h)
 `)
 }

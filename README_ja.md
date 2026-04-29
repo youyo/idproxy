@@ -250,6 +250,36 @@ aws dynamodb scan \
 
 `used=true` は rotation 済みを示し、TTL により自動削除されます。
 
+## Store バックエンド
+
+idproxy はセッション・認可コード・アクセス/リフレッシュトークン・動的登録クライアントを `Store` インターフェース経由で永続化します。以下の実装を同梱しています。
+
+| バックエンド | パッケージ | 用途 | TTL 戦略 | refresh rotation の CAS |
+|---|---|---|---|---|
+| Memory | `store` (`NewMemoryStore`) | 単一インスタンス／開発／テスト | In-process タイマー + Cleanup ゴルーチン | Mutex |
+| DynamoDB | `store` (`NewDynamoDBStore`) | AWS マルチコンテナ (Lambda) | DynamoDB TTL | `ConditionExpression` |
+| SQLite | `store/sqlite` (`sqlite.New`) | 単一ノードのファイル永続化（CGO 不要） | 行ごとの `expires_at` + 5 分 Cleanup ゴルーチン | `BEGIN IMMEDIATE` + `used=0` CAS |
+| Redis | `store/redis` (`redis.New`) | 汎用分散 KV | ネイティブ `EX` | 埋め込み Lua script (`consume.lua`) |
+| Momento | `store/momento` (`momento.New`) | サーバーレス分散キャッシュ | ネイティブ TTL | `SetIfEqual` |
+
+`idproxy` バイナリ利用時は `STORE_BACKEND` 環境変数でバックエンドを選択できます。各バックエンドが要求する env はバイナリの `--help` または [cmd/idproxy](cmd/idproxy) のソースを参照してください。
+
+### バイナリでの切替
+
+```sh
+# SQLite
+STORE_BACKEND=sqlite SQLITE_PATH=/var/lib/idproxy/state.db idproxy
+
+# Redis
+STORE_BACKEND=redis REDIS_ADDR=redis.internal:6379 idproxy
+
+# Momento
+STORE_BACKEND=momento MOMENTO_AUTH_TOKEN=... MOMENTO_CACHE_NAME=idproxy idproxy
+
+# DynamoDB
+STORE_BACKEND=dynamodb DYNAMODB_TABLE_NAME=my-idproxy-table AWS_REGION=ap-northeast-1 idproxy
+```
+
 ## DynamoDB Store
 
 AWS Lambda のマルチコンテナ環境など、複数インスタンスで状態を共有する必要がある場合は `DynamoDBStore` を使用します。

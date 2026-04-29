@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- feat(store): SQLite Store を追加（`store/sqlite`）
+  - 単一ノードでのファイルベース永続化に適する。`modernc.org/sqlite` を使用するため CGO 不要
+  - `:memory:` でテスト用途も対応
+  - ConsumeRefreshToken はトランザクション + `used=0` CAS で atomic に実装
+- feat(store): Redis Store を追加（`store/redis`）
+  - go-redis v9 ベース。汎用分散 KV による複数インスタンス間状態共有向け
+  - ConsumeRefreshToken は埋め込み Lua script (`consume.lua`) で atomic に実装
+  - native TTL に委譲するため `Cleanup()` は no-op
+- feat(store): Momento Store を追加（`store/momento`）
+  - Momento Serverless Cache。サーバーレス分散環境で運用負荷低
+  - ConsumeRefreshToken は Momento の `SetIfEqual` で atomic CAS を実現
+  - テスト用に `NewMemoryBackend()` を提供
+- feat(store): 適合性テストスイート `store/storetest` を追加。全 Store 実装で共通の挙動を保証
+- feat(cmd): `STORE_BACKEND` 環境変数で Store バックエンドを選択可能に
+  - `memory` (default) / `dynamodb` / `sqlite` / `redis` / `momento`
+  - DynamoDB 切替も本リリースでバイナリから初対応（従来はライブラリ API のみ）
+  - 各バックエンドの env 仕様は `idproxy --help` または README 参照
+
 ## [v0.3.1] - 2026-04-20
 
 ### Added

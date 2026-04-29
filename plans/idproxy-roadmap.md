@@ -191,6 +191,16 @@
 - [x] `go.mod` / `go.sum` — `aws-sdk-go-v2/config`, `aws-sdk-go-v2/service/dynamodb` 依存追加
 - 📄 詳細: plans/idproxy-m21-dynamodb-store.md
 
+### M22: Store バックエンド拡張 ✅
+- [x] `store/storetest/conformance.go` — Store 実装の適合性テストスイート
+- [x] `store/sqlite/` — SQLite Store（modernc.org/sqlite, CGO 不要）
+- [x] `store/redis/` — Redis Store（go-redis v9 + 埋め込み Lua script for atomic CAS）
+- [x] `store/momento/` — Momento Store（SetIfEqual ネイティブ CAS）
+- [x] `cmd/idproxy/config.go` — `loadStore()` で `STORE_BACKEND` 環境変数切替（memory / dynamodb / sqlite / redis / momento）
+- [x] `cmd/idproxy/store_test.go` — env テーブル駆動テスト
+- [x] `CHANGELOG.md` — Unreleased エントリ追加
+- 📄 詳細: plans/sqlite-dynamodb-lucky-gosling.md
+
 ## Blockers
 なし
 
