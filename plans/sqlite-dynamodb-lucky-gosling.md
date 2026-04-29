@@ -1,5 +1,11 @@
 # Store バックエンド拡張 + Cognito 公式サポート
 
+> **実装結果との差分（2026-04-29 追記）**:
+> - **Momento は本 PR で見送り**: deprecated SDK API・重い transitive 依存・`SetIfEqual` の TTL/CAS 制約に起因するレビュー指摘多発のため、PR レビュー過程で削除を決定。実装範囲は **SQLite / Redis の 2 種**。
+> - **Go module 構成は単一 `go.mod` 維持**: 計画書では「各バックエンドを個別 Go module 化 + `go.work` でトップレベル管理」を推奨していたが、依存追加コストの実測と運用シンプルさを優先し、単一 `go.mod` に依存を追加する形に変更。ライブラリ利用者がドライバ依存を引かない構造は、ビルドタグや別パッケージ分離で同等に実現できると判断。
+>
+> 以下の本文は計画策定時のスナップショット。
+
 ## Context
 
 idproxy は分散環境（Lambda マルチコンテナ等）向けの永続化として現状 `MemoryStore` と `DynamoDBStore` の 2 実装を持つ。`Store` インターフェースは `store.go:14-49` に定義された 13 メソッド構成（Session / AuthCode / AccessToken / Client / RefreshToken / FamilyRevocation + Cleanup / Close）。
