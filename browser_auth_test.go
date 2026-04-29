@@ -291,6 +291,9 @@ func TestCallbackHandler_PreferredUsernameFallback(t *testing.T) {
 			sessCookie = c
 		}
 	}
+	if sessCookie == nil {
+		t.Fatalf("session cookie %q not set on callback response", sessionCookieName)
+	}
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(sessCookie)
 	sess, err := ba.sm.GetSessionFromRequest(r.Context(), r)

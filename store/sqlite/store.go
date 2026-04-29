@@ -102,10 +102,15 @@ func New(path string) (*Store, error) {
 // NewWithCleanupInterval は cleanup ゴルーチンの周期を指定して Store を生成する。
 // interval <= 0 の場合は cleanup ゴルーチンを起動しない（テスト用途）。
 func NewWithCleanupInterval(path string, interval time.Duration) (*Store, error) {
-	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)"
+	// _txlock=immediate: database/sql の BeginTx が "BEGIN IMMEDIATE" を発行するようにする。
+	// ConsumeRefreshToken の CAS では SELECT → UPDATE の順で操作するため、deferred BEGIN だと
+	// SELECT 時点では shared lock しか取れず、UPDATE で初めて write lock を取りに行くタイミングで
+	// 並行トランザクションと SQLITE_BUSY を起こしうる。immediate にすると BEGIN 時点で
+	// reserved lock を取得し、レース全体を直列化できる。
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	if path == ":memory:" {
 		// :memory: では WAL が使えないため pragma を絞る
-		dsn = path + "?_pragma=busy_timeout(5000)"
+		dsn = path + "?_pragma=busy_timeout(5000)&_txlock=immediate"
 	}
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
@@ -482,10 +487,18 @@ func (s *Store) Cleanup(ctx context.Context) error {
 		return err
 	}
 	now := nowUnix()
-	tables := []string{"sessions", "auth_codes", "access_tokens", "refresh_tokens", "family_revocations"}
-	for _, t := range tables {
-		if _, err := s.db.ExecContext(ctx, "DELETE FROM "+t+" WHERE expires_at <= ?", now); err != nil {
-			return fmt.Errorf("sqlite: cleanup %s: %w", t, err)
+	// テーブル名は固定の定数 SQL 5 本に展開する。動的連結を避けることで
+	// 静的解析（CWE-89）を満たし、誤って外部入力を渡す回帰も防ぐ。
+	stmts := []string{
+		`DELETE FROM sessions WHERE expires_at <= ?`,
+		`DELETE FROM auth_codes WHERE expires_at <= ?`,
+		`DELETE FROM access_tokens WHERE expires_at <= ?`,
+		`DELETE FROM refresh_tokens WHERE expires_at <= ?`,
+		`DELETE FROM family_revocations WHERE expires_at <= ?`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.ExecContext(ctx, q, now); err != nil {
+			return fmt.Errorf("sqlite: cleanup: %w", err)
 		}
 	}
 	return nil

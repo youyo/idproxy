@@ -79,7 +79,9 @@ func (m *MockIdP) Issuer() string {
 
 // SetExtraClaims は ID Token 発行時に追加するクレームを設定する。
 // Cognito の `cognito:username` / `cognito:groups` のような IdP 固有クレームを
-// テストで再現するために使用する。値は呼び出し時点でコピーされる。
+// テストで再現するために使用する。マップは shallow copy で取り込まれるため、
+// 呼び出し後にトップレベルキーを追加・削除しても影響しないが、参照型
+// （[]string・map・ポインタ等）の中身を呼び出し側で書き換えると反映される点に注意。
 func (m *MockIdP) SetExtraClaims(claims map[string]any) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

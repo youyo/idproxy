@@ -232,8 +232,14 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, id string) (*idproxy.Re
 	}
 
 	// TTL 維持: Momento は SetIfEqual 時に新しい TTL が必須。
-	// 元 TTL を取れない場合は defaultTTL で更新する（運用上 RT は数日〜数週なので defaultTTL=24h でも妥当）。
-	swapped, err := s.backend.SetIfEqual(ctx, key, usedJSON, current, s.defaultTTL)
+	// RefreshTokenData.ExpiresAt から残 TTL を算出することで、Used=true tombstone の
+	// 有効期限が元の RT と揃い、replay 検知ウィンドウが defaultTTL に短縮されない。
+	// 期限切れ間近 / 既に超過している場合は最低 1 分は残す（直後の replay を確実に検知するため）。
+	ttl := time.Until(v.ExpiresAt)
+	if ttl < time.Minute {
+		ttl = time.Minute
+	}
+	swapped, err := s.backend.SetIfEqual(ctx, key, usedJSON, current, ttl)
 	if err != nil {
 		return nil, fmt.Errorf("momento: setifequal: %w", err)
 	}
