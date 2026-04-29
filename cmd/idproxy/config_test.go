@@ -256,7 +256,6 @@ func setEnvs(t *testing.T, envs map[string]string) {
 		"DYNAMODB_TABLE_NAME", "AWS_REGION",
 		"SQLITE_PATH",
 		"REDIS_ADDR", "REDIS_PASSWORD", "REDIS_DB", "REDIS_TLS", "REDIS_KEY_PREFIX",
-		"MOMENTO_AUTH_TOKEN", "MOMENTO_CACHE_NAME", "MOMENTO_DEFAULT_TTL",
 	}
 	for _, k := range allKeys {
 		t.Setenv(k, "")

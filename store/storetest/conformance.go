@@ -594,16 +594,22 @@ func runCleanupTests(t *testing.T, newStore Factory) {
 		defer cleanup()
 		ctx := context.Background()
 
-		_ = s.SetSession(ctx, "s-exp", NewSession("s-exp"), time.Nanosecond)
-		_ = s.SetSession(ctx, "s-ok", NewSession("s-ok"), time.Hour)
-		_ = s.SetAuthCode(ctx, "a-exp", NewAuthCodeData("a-exp"), time.Nanosecond)
-		_ = s.SetAuthCode(ctx, "a-ok", NewAuthCodeData("a-ok"), time.Hour)
-		_ = s.SetAccessToken(ctx, "t-exp", NewAccessTokenData("t-exp"), time.Nanosecond)
-		_ = s.SetAccessToken(ctx, "t-ok", NewAccessTokenData("t-ok"), time.Hour)
-		_ = s.SetRefreshToken(ctx, "r-exp", NewRefreshTokenData("r-exp"), time.Nanosecond)
-		_ = s.SetRefreshToken(ctx, "r-ok", NewRefreshTokenData("r-ok"), time.Hour)
-		_ = s.SetFamilyRevocation(ctx, "f-exp", time.Nanosecond)
-		_ = s.SetFamilyRevocation(ctx, "f-ok", time.Hour)
+		mustSet := func(name string, err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+		}
+		mustSet("SetSession s-exp", s.SetSession(ctx, "s-exp", NewSession("s-exp"), time.Nanosecond))
+		mustSet("SetSession s-ok", s.SetSession(ctx, "s-ok", NewSession("s-ok"), time.Hour))
+		mustSet("SetAuthCode a-exp", s.SetAuthCode(ctx, "a-exp", NewAuthCodeData("a-exp"), time.Nanosecond))
+		mustSet("SetAuthCode a-ok", s.SetAuthCode(ctx, "a-ok", NewAuthCodeData("a-ok"), time.Hour))
+		mustSet("SetAccessToken t-exp", s.SetAccessToken(ctx, "t-exp", NewAccessTokenData("t-exp"), time.Nanosecond))
+		mustSet("SetAccessToken t-ok", s.SetAccessToken(ctx, "t-ok", NewAccessTokenData("t-ok"), time.Hour))
+		mustSet("SetRefreshToken r-exp", s.SetRefreshToken(ctx, "r-exp", NewRefreshTokenData("r-exp"), time.Nanosecond))
+		mustSet("SetRefreshToken r-ok", s.SetRefreshToken(ctx, "r-ok", NewRefreshTokenData("r-ok"), time.Hour))
+		mustSet("SetFamilyRevocation f-exp", s.SetFamilyRevocation(ctx, "f-exp", time.Nanosecond))
+		mustSet("SetFamilyRevocation f-ok", s.SetFamilyRevocation(ctx, "f-ok", time.Hour))
 		time.Sleep(10 * time.Millisecond)
 
 		if err := s.Cleanup(ctx); err != nil {

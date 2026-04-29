@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestLoadStore_Memory(t *testing.T) {
 
 func TestLoadStore_SQLite(t *testing.T) {
 	t.Setenv("STORE_BACKEND", "sqlite")
-	t.Setenv("SQLITE_PATH", t.TempDir()+"/store.db")
+	t.Setenv("SQLITE_PATH", filepath.Join(t.TempDir(), "store.db"))
 	s, err := loadStore()
 	if err != nil {
 		t.Fatalf("loadStore: %v", err)
@@ -67,36 +68,6 @@ func TestLoadStore_RedisInvalidDB(t *testing.T) {
 	_, err := loadStore()
 	if err == nil || !strings.Contains(err.Error(), "REDIS_DB") {
 		t.Errorf("expected REDIS_DB error, got %v", err)
-	}
-}
-
-func TestLoadStore_MomentoMissingToken(t *testing.T) {
-	t.Setenv("STORE_BACKEND", "momento")
-	t.Setenv("MOMENTO_AUTH_TOKEN", "")
-	_, err := loadStore()
-	if err == nil || !strings.Contains(err.Error(), "MOMENTO_AUTH_TOKEN") {
-		t.Errorf("expected MOMENTO_AUTH_TOKEN error, got %v", err)
-	}
-}
-
-func TestLoadStore_MomentoMissingCache(t *testing.T) {
-	t.Setenv("STORE_BACKEND", "momento")
-	t.Setenv("MOMENTO_AUTH_TOKEN", "dummy")
-	t.Setenv("MOMENTO_CACHE_NAME", "")
-	_, err := loadStore()
-	if err == nil || !strings.Contains(err.Error(), "MOMENTO_CACHE_NAME") {
-		t.Errorf("expected MOMENTO_CACHE_NAME error, got %v", err)
-	}
-}
-
-func TestLoadStore_MomentoInvalidTTL(t *testing.T) {
-	t.Setenv("STORE_BACKEND", "momento")
-	t.Setenv("MOMENTO_AUTH_TOKEN", "dummy")
-	t.Setenv("MOMENTO_CACHE_NAME", "c")
-	t.Setenv("MOMENTO_DEFAULT_TTL", "not-a-duration")
-	_, err := loadStore()
-	if err == nil || !strings.Contains(err.Error(), "MOMENTO_DEFAULT_TTL") {
-		t.Errorf("expected MOMENTO_DEFAULT_TTL error, got %v", err)
 	}
 }
 

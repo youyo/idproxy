@@ -7,11 +7,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	idproxy "github.com/youyo/idproxy"
 	"github.com/youyo/idproxy/store"
-	momentostore "github.com/youyo/idproxy/store/momento"
 	redisstore "github.com/youyo/idproxy/store/redis"
 	sqlitestore "github.com/youyo/idproxy/store/sqlite"
 )
@@ -131,7 +129,7 @@ func parseConfig() (idproxy.Config, string, string, error) {
 }
 
 // loadStore は STORE_BACKEND 環境変数を見て idproxy.Store 実装を生成する。
-// サポートする値: memory(default) / dynamodb / sqlite / redis / momento
+// サポートする値: memory(default) / dynamodb / sqlite / redis
 func loadStore() (idproxy.Store, error) {
 	backend := strings.ToLower(strings.TrimSpace(os.Getenv("STORE_BACKEND")))
 	if backend == "" {
@@ -184,31 +182,8 @@ func loadStore() (idproxy.Store, error) {
 			KeyPrefix: os.Getenv("REDIS_KEY_PREFIX"),
 		})
 
-	case "momento":
-		token := os.Getenv("MOMENTO_AUTH_TOKEN")
-		cacheName := os.Getenv("MOMENTO_CACHE_NAME")
-		if token == "" {
-			return nil, fmt.Errorf("STORE_BACKEND=momento requires MOMENTO_AUTH_TOKEN")
-		}
-		if cacheName == "" {
-			return nil, fmt.Errorf("STORE_BACKEND=momento requires MOMENTO_CACHE_NAME")
-		}
-		var defaultTTL time.Duration
-		if v := os.Getenv("MOMENTO_DEFAULT_TTL"); v != "" {
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return nil, fmt.Errorf("MOMENTO_DEFAULT_TTL: %w", err)
-			}
-			defaultTTL = d
-		}
-		return momentostore.New(momentostore.Options{
-			AuthToken:  token,
-			CacheName:  cacheName,
-			DefaultTTL: defaultTTL,
-		})
-
 	default:
-		return nil, fmt.Errorf("STORE_BACKEND %q not supported (allowed: memory, dynamodb, sqlite, redis, momento)", backend)
+		return nil, fmt.Errorf("STORE_BACKEND %q not supported (allowed: memory, dynamodb, sqlite, redis)", backend)
 	}
 }
 
@@ -255,7 +230,7 @@ Environment Variables:
     PORT                  Listen port (default: 8080)
 
   Store backend (optional, default: memory):
-    STORE_BACKEND         Store backend: memory (default) | dynamodb | sqlite | redis | momento
+    STORE_BACKEND         Store backend: memory (default) | dynamodb | sqlite | redis
 
     For STORE_BACKEND=dynamodb:
       DYNAMODB_TABLE_NAME   DynamoDB table name (required)
@@ -270,10 +245,5 @@ Environment Variables:
       REDIS_DB              Redis DB number (optional, default: 0)
       REDIS_TLS             "true" to enable TLS (optional)
       REDIS_KEY_PREFIX      Key prefix (optional, e.g. "idproxy:")
-
-    For STORE_BACKEND=momento:
-      MOMENTO_AUTH_TOKEN    Momento auth token (required)
-      MOMENTO_CACHE_NAME    Momento cache name (required, must exist)
-      MOMENTO_DEFAULT_TTL   Default TTL for client records (e.g. "24h", default: 24h)
 `)
 }

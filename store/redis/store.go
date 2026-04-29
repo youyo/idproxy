@@ -247,6 +247,17 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, id string) (*idproxy.Re
 	case "notfound":
 		return nil, nil
 	case "replay":
+		// 初回 GET と Lua 実行の間に他プロセスが Used=true に切り替えた場合、
+		// 手元の v は stale (Used=false)。Lua が返す authoritative JSON を
+		// 優先して unmarshal し、最新の FamilyID 等を返す。
+		if len(res) >= 2 {
+			if rawStr, ok := res[1].(string); ok {
+				var auth idproxy.RefreshTokenData
+				if err := json.Unmarshal([]byte(rawStr), &auth); err == nil {
+					return &auth, idproxy.ErrRefreshTokenAlreadyConsumed
+				}
+			}
+		}
 		return &v, idproxy.ErrRefreshTokenAlreadyConsumed
 	case "ok":
 		return &usedCopy, nil
