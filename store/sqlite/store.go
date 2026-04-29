@@ -419,6 +419,9 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, id string) (*idproxy.Re
 			continue
 		}
 		if err := tx.Commit(); err != nil {
+			// Commit 失敗時 database/sql は内部で finalize するが、念のため
+			// 明示的に Rollback してリソース解放を確実化する（ErrTxDone は無視）。
+			_ = tx.Rollback()
 			if isBusy(err) {
 				continue
 			}

@@ -93,6 +93,14 @@ func NewClientData(clientID string) *idproxy.ClientData {
 	}
 }
 
+// NewRefreshTokenData は本番想定 (30 日 RT) のテストデータを返す。
+// ExpiresAt は本番 oauth_server と同じく長期有効期限を設定するが、
+// Store の TTL 契約は SetRefreshToken の `ttl` 引数側に従う点に注意。
+// 各テストでは `ttl` を引数で別途指定するため、
+// `ExpiresAt` と `ttl` が一致しないテストケースが存在しうる
+// （例: ConsumeExpired は ttl=1ns を渡し ExpiresAt は 30 日）。
+// 本番では oauth_server が両者を揃えるため、これは Store 実装が
+// `ttl` 引数のみを TTL 判定に使うことを担保するための意図的な分離。
 func NewRefreshTokenData(id string) *idproxy.RefreshTokenData {
 	now := time.Now()
 	return &idproxy.RefreshTokenData{
@@ -170,10 +178,17 @@ func runSessionTests(t *testing.T, newStore Factory) {
 		sess2 := NewSession("sess-ow")
 		sess2.IDToken = "updated-token"
 
-		_ = s.SetSession(ctx, sess1.ID, sess1, time.Hour)
-		_ = s.SetSession(ctx, sess1.ID, sess2, time.Hour)
+		if err := s.SetSession(ctx, sess1.ID, sess1, time.Hour); err != nil {
+			t.Fatalf("SetSession 1: %v", err)
+		}
+		if err := s.SetSession(ctx, sess1.ID, sess2, time.Hour); err != nil {
+			t.Fatalf("SetSession 2: %v", err)
+		}
 
-		got, _ := s.GetSession(ctx, sess1.ID)
+		got, err := s.GetSession(ctx, sess1.ID)
+		if err != nil {
+			t.Fatalf("GetSession: %v", err)
+		}
 		if got == nil || got.IDToken != "updated-token" {
 			t.Errorf("overwrite failed: %+v", got)
 		}

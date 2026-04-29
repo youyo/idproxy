@@ -1,8 +1,7 @@
 -- ConsumeRefreshToken 用 Lua script。
 -- KEYS[1]: refresh token のキー
--- ARGV[1]: 現在時刻 (ms, ローカルクロック)
--- ARGV[2]: Used=true に更新した新しい JSON シリアライズ
--- ARGV[3]: PEXPIRE 用の残り TTL (ms)
+-- ARGV[1]: Used=true に更新した新しい JSON シリアライズ
+-- ARGV[2]: PEXPIRE 用の残り TTL (ms)
 --
 -- 戻り値:
 --   {"notfound"}                 — キーが存在しない（or 期限切れ）
@@ -21,8 +20,8 @@ if string.find(raw, '"Used":true', 1, true) then
 end
 
 -- CAS: 値を Used=true 版に置換し、TTL を維持
-redis.call("SET", KEYS[1], ARGV[2])
-local ttl = tonumber(ARGV[3])
+redis.call("SET", KEYS[1], ARGV[1])
+local ttl = tonumber(ARGV[2])
 if ttl and ttl > 0 then
     redis.call("PEXPIRE", KEYS[1], ttl)
 end

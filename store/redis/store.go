@@ -235,7 +235,7 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, id string) (*idproxy.Re
 	}
 
 	res, err := s.consume.Run(ctx, s.client, []string{key},
-		time.Now().UnixMilli(), string(usedJSON), ttlMs).Slice()
+		string(usedJSON), ttlMs).Slice()
 	if err != nil {
 		return nil, fmt.Errorf("redis: consume run: %w", err)
 	}

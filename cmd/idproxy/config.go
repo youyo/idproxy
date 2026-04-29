@@ -170,6 +170,9 @@ func loadStore() (idproxy.Store, error) {
 			if err != nil {
 				return nil, fmt.Errorf("REDIS_DB: %w", err)
 			}
+			if n < 0 {
+				return nil, fmt.Errorf("REDIS_DB must be non-negative, got %d", n)
+			}
 			dbNum = n
 		}
 		tls := strings.EqualFold(os.Getenv("REDIS_TLS"), "true")
