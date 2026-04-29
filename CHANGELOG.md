@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `memory` (default) / `dynamodb` / `sqlite` / `redis` / `momento`
   - DynamoDB 切替も本リリースでバイナリから初対応（従来はライブラリ API のみ）
   - 各バックエンドの env 仕様は `idproxy --help` または README 参照
+- feat(provider): Amazon Cognito User Pool を公式サポート対象に追加
+  - `cognito-idp.<region>.amazonaws.com` 形式の Issuer を `Amazon Cognito` として自動表示
+  - knownIssuers を完全一致 map + 正規表現パターン slice に拡張（順序保持・将来拡張容易）
+- feat(browser_auth): ID Token の `name` クレーム未設定時に fallback を導入
+  - 1) `cognito:username`（Amazon Cognito）→ 2) `preferred_username`（OIDC 標準）
+  - 既存 IdP（`name` クレーム提供）には影響なし
+- feat(testutil): `MockIdP.SetExtraClaims(map[string]any)` を追加
+  - `cognito:username` 等の IdP 固有クレームをテストで再現可能に
 
 ## [v0.3.1] - 2026-04-20
 

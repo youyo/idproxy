@@ -98,6 +98,9 @@ services:
 |-------------|--------------|-----------|
 | Google | `https://accounts.google.com` | [OpenID Connect — Google Identity](https://developers.google.com/identity/openid-connect/openid-connect) |
 | Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [アプリケーションの登録 — Microsoft ID プラットフォーム](https://learn.microsoft.com/ja-jp/entra/identity-platform/quickstart-register-app) |
+| Amazon Cognito | `https://cognito-idp.{region}.amazonaws.com/{user-pool-id}` | [ユーザープールのアプリクライアント設定 — Amazon Cognito](https://docs.aws.amazon.com/ja_jp/cognito/latest/developerguide/cognito-user-pools-app-idp-settings.html) |
+
+Amazon Cognito を使う場合は App Client の許可スコープに `openid email profile` を含めてください。Cognito の ID Token はユーザープールの構成によって `name` クレームを含まないことがあります。その場合 idproxy は自動的に `cognito:username`（さらに `preferred_username`）を表示名として fallback します。
 
 OIDC プロバイダーへ idproxy をクライアントとして登録する際は、リダイレクト URI を以下のように設定してください：
 

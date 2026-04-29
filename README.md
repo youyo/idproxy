@@ -98,6 +98,9 @@ services:
 |----------|--------------|-------------|
 | Google | `https://accounts.google.com` | [OpenID Connect — Google Identity](https://developers.google.com/identity/openid-connect/openid-connect) |
 | Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [Register an application — Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app) |
+| Amazon Cognito | `https://cognito-idp.{region}.amazonaws.com/{user-pool-id}` | [Configure user pool app client — Amazon Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-app-idp-settings.html) |
+
+For Amazon Cognito, request scopes `openid email profile` on the App Client. Cognito ID tokens may omit the `name` claim depending on user pool configuration; idproxy automatically falls back to `cognito:username` (and then `preferred_username`) for the user's display name.
 
 When registering idproxy as a client in your OIDC provider, set the redirect URI to:
 

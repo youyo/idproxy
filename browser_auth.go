@@ -238,13 +238,24 @@ func (ba *BrowserAuth) CallbackHandler() http.Handler {
 
 		// クレームを抽出
 		var claims struct {
-			Email string `json:"email"`
-			Name  string `json:"name"`
+			Email           string `json:"email"`
+			Name            string `json:"name"`
+			CognitoUsername string `json:"cognito:username"`
+			PreferredName   string `json:"preferred_username"`
 		}
 		if err := idToken.Claims(&claims); err != nil {
 			ba.logger.Error("failed to extract claims", "error", err)
 			http.Error(w, "failed to extract claims", http.StatusInternalServerError)
 			return
+		}
+
+		// name が空の場合は Cognito の cognito:username、次に preferred_username を fallback として使用
+		if claims.Name == "" {
+			if claims.CognitoUsername != "" {
+				claims.Name = claims.CognitoUsername
+			} else if claims.PreferredName != "" {
+				claims.Name = claims.PreferredName
+			}
 		}
 
 		// AllowedDomains / AllowedEmails 認可判定

@@ -268,6 +268,21 @@ func TestResolveProviderName_Microsoft(t *testing.T) {
 	}
 }
 
+// T15b: Name 未指定 - Amazon Cognito (リージョン違い)
+func TestResolveProviderName_Cognito(t *testing.T) {
+	cases := []string{
+		"https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123",
+		"https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_xyz",
+		"https://cognito-idp.eu-west-2.amazonaws.com/eu-west-2_AbCdEf",
+	}
+	for _, issuer := range cases {
+		got := resolveProviderName(OIDCProvider{Issuer: issuer})
+		if got != "Amazon Cognito" {
+			t.Errorf("resolveProviderName(%q) = %q, want Amazon Cognito", issuer, got)
+		}
+	}
+}
+
 // T16: Name 未指定 - 未知
 func TestResolveProviderName_Unknown(t *testing.T) {
 	p := OIDCProvider{
