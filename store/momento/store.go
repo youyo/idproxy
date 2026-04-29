@@ -195,7 +195,12 @@ func (s *Store) DeleteClient(ctx context.Context, clientID string) error {
 // --- RefreshToken ---
 
 func (s *Store) SetRefreshToken(ctx context.Context, id string, data *idproxy.RefreshTokenData, ttl time.Duration) error {
-	return s.setJSON(ctx, "refreshtoken", id, data, ttl)
+	// ConsumeRefreshToken は v.ExpiresAt から replay tombstone の TTL を算出するため、
+	// 永続化時点で ExpiresAt を ttl 引数と整合させる（呼び出し元の設定値より ttl 引数を優先）。
+	// data 自体は呼び出し側のオブジェクトなのでコピーを作って書き換える。
+	persisted := *data
+	persisted.ExpiresAt = time.Now().Add(ttl)
+	return s.setJSON(ctx, "refreshtoken", id, &persisted, ttl)
 }
 func (s *Store) GetRefreshToken(ctx context.Context, id string) (*idproxy.RefreshTokenData, error) {
 	var v idproxy.RefreshTokenData
@@ -255,9 +260,14 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, id string) (*idproxy.Re
 	}
 	if !swapped {
 		// 競合: 別ゴルーチンが先に Used=true に切替済み → replay
-		// 値を再取得して FamilyID を返す
-		again, _, _ := s.backend.Get(ctx, key)
-		if len(again) > 0 {
+		// 値を再取得して FamilyID を返す。
+		// backend エラーを握りつぶすと不健全なバックエンドを replay と誤検知してしまうため、
+		// err を明示的にチェックし、非 nil ならそのまま返す。
+		again, ok, gerr := s.backend.Get(ctx, key)
+		if gerr != nil {
+			return nil, fmt.Errorf("momento: consume refetch: %w", gerr)
+		}
+		if ok && len(again) > 0 {
 			var v2 idproxy.RefreshTokenData
 			if json.Unmarshal(again, &v2) == nil && v2.Used {
 				return &v2, idproxy.ErrRefreshTokenAlreadyConsumed

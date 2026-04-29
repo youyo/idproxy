@@ -664,6 +664,14 @@ func runContextCanceledTests(t *testing.T, newStore Factory) {
 			{"SetAccessToken", func() error { return s.SetAccessToken(ctx, "x", NewAccessTokenData("x"), time.Hour) }},
 			{"GetAccessToken", func() error { _, err := s.GetAccessToken(ctx, "x"); return err }},
 			{"DeleteAccessToken", func() error { return s.DeleteAccessToken(ctx, "x") }},
+			{"SetClient", func() error { return s.SetClient(ctx, "x", NewClientData("x")) }},
+			{"GetClient", func() error { _, err := s.GetClient(ctx, "x"); return err }},
+			{"SetRefreshToken", func() error { return s.SetRefreshToken(ctx, "x", NewRefreshTokenData("x"), time.Hour) }},
+			{"GetRefreshToken", func() error { _, err := s.GetRefreshToken(ctx, "x"); return err }},
+			{"ConsumeRefreshToken", func() error { _, err := s.ConsumeRefreshToken(ctx, "x"); return err }},
+			{"SetFamilyRevocation", func() error { return s.SetFamilyRevocation(ctx, "x", time.Hour) }},
+			{"IsFamilyRevoked", func() error { _, err := s.IsFamilyRevoked(ctx, "x"); return err }},
+			{"Cleanup", func() error { return s.Cleanup(ctx) }},
 		}
 		for _, op := range ops {
 			if err := op.fn(); err != context.Canceled {
