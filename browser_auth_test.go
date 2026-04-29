@@ -213,6 +213,98 @@ func TestCallbackHandler_FullFlow(t *testing.T) {
 	}
 }
 
+// Cognito 対応: name クレーム未設定時に cognito:username を fallback として使う
+func TestCallbackHandler_CognitoUsernameFallback(t *testing.T) {
+	ba, idp := setupBrowserAuth(t)
+
+	// Cognito 風: name は無く cognito:username が入る
+	idp.SetExtraClaims(map[string]any{
+		"cognito:username": "alice-cognito",
+		"cognito:groups":   []string{"admins"},
+	})
+
+	loginReq := httptest.NewRequest(http.MethodGet, "/login?redirect_to=/", nil)
+	loginRec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(loginRec, loginReq)
+	loc, _ := url.Parse(loginRec.Header().Get("Location"))
+	state := loc.Query().Get("state")
+	nonce := loc.Query().Get("nonce")
+
+	code := idp.IssueCode("alice-sub", "alice@example.com", "test-client-id", nonce)
+	callbackReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil)
+	callbackRec := httptest.NewRecorder()
+	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
+	if callbackRec.Code != http.StatusFound {
+		t.Fatalf("callback: expected 302, got %d; body: %s", callbackRec.Code, callbackRec.Body.String())
+	}
+
+	// Cookie からセッションを取得して User.Name を検証
+	var sessCookie *http.Cookie
+	for _, c := range callbackRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatal("session cookie not found")
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(sessCookie)
+	sess, err := ba.sm.GetSessionFromRequest(r.Context(), r)
+	if err != nil {
+		t.Fatalf("GetSessionFromRequest: %v", err)
+	}
+	if sess == nil || sess.User == nil {
+		t.Fatal("session/user is nil")
+	}
+	if sess.User.Name != "alice-cognito" {
+		t.Errorf("User.Name = %q, want alice-cognito (cognito:username fallback)", sess.User.Name)
+	}
+}
+
+// preferred_username fallback（name も cognito:username も無い場合）
+func TestCallbackHandler_PreferredUsernameFallback(t *testing.T) {
+	ba, idp := setupBrowserAuth(t)
+
+	idp.SetExtraClaims(map[string]any{
+		"preferred_username": "bob-pref",
+	})
+
+	loginReq := httptest.NewRequest(http.MethodGet, "/login?redirect_to=/", nil)
+	loginRec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(loginRec, loginReq)
+	loc, _ := url.Parse(loginRec.Header().Get("Location"))
+	state := loc.Query().Get("state")
+	nonce := loc.Query().Get("nonce")
+
+	code := idp.IssueCode("bob-sub", "bob@example.com", "test-client-id", nonce)
+	callbackReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil)
+	callbackRec := httptest.NewRecorder()
+	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
+	if callbackRec.Code != http.StatusFound {
+		t.Fatalf("callback: expected 302, got %d", callbackRec.Code)
+	}
+
+	var sessCookie *http.Cookie
+	for _, c := range callbackRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			sessCookie = c
+		}
+	}
+	if sessCookie == nil {
+		t.Fatalf("session cookie %q not set on callback response", sessionCookieName)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(sessCookie)
+	sess, err := ba.sm.GetSessionFromRequest(r.Context(), r)
+	if err != nil {
+		t.Fatalf("GetSessionFromRequest: %v", err)
+	}
+	if sess.User.Name != "bob-pref" {
+		t.Errorf("User.Name = %q, want bob-pref (preferred_username fallback)", sess.User.Name)
+	}
+}
+
 func TestCallbackHandler_DefaultRedirect(t *testing.T) {
 	ba, idp := setupBrowserAuth(t)
 

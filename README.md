@@ -98,6 +98,9 @@ services:
 |----------|--------------|-------------|
 | Google | `https://accounts.google.com` | [OpenID Connect — Google Identity](https://developers.google.com/identity/openid-connect/openid-connect) |
 | Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [Register an application — Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app) |
+| Amazon Cognito | `https://cognito-idp.{region}.amazonaws.com/{user-pool-id}` | [Configure user pool app client — Amazon Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-app-idp-settings.html) |
+
+For Amazon Cognito, request scopes `openid email profile` on the App Client. Cognito ID tokens may omit the `name` claim depending on user pool configuration; idproxy automatically falls back to `cognito:username` (and then `preferred_username`) for the user's display name.
 
 When registering idproxy as a client in your OIDC provider, set the redirect URI to:
 
@@ -251,6 +254,32 @@ aws dynamodb scan \
 ```
 
 `used=true` indicates the token has been rotated; it will be deleted by TTL.
+
+## Store Backends
+
+idproxy persists sessions, authorization codes, access/refresh tokens and dynamically registered clients via the `Store` interface. Several implementations are bundled:
+
+| Backend | Package | Use case | TTL strategy | CAS for refresh rotation |
+|---|---|---|---|---|
+| Memory | `store` (`NewMemoryStore`) | Single-instance / dev / tests | In-process timer + Cleanup goroutine | Mutex |
+| DynamoDB | `store` (`NewDynamoDBStore`) | AWS multi-container (Lambda) | DynamoDB TTL | `ConditionExpression` |
+| SQLite | `store/sqlite` (`sqlite.New`) | Single-node file-based persistence (CGO-free) | Per-row `expires_at` + 5-min Cleanup goroutine | `BEGIN IMMEDIATE` + `used=0` CAS |
+| Redis | `store/redis` (`redis.New`) | General-purpose distributed KV | Native `EX` | Embedded Lua script (`consume.lua`) |
+
+When using the `idproxy` standalone binary, select a backend via the `STORE_BACKEND` environment variable. See the binary's `--help` or the [cmd/idproxy](cmd/idproxy) sources for required env vars per backend.
+
+### Selecting from the binary
+
+```sh
+# SQLite
+STORE_BACKEND=sqlite SQLITE_PATH=/var/lib/idproxy/state.db idproxy
+
+# Redis
+STORE_BACKEND=redis REDIS_ADDR=redis.internal:6379 idproxy
+
+# DynamoDB
+STORE_BACKEND=dynamodb DYNAMODB_TABLE_NAME=my-idproxy-table AWS_REGION=ap-northeast-1 idproxy
+```
 
 ## DynamoDB Store
 

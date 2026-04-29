@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- feat(store): SQLite Store を追加（`store/sqlite`）
+  - 単一ノードでのファイルベース永続化に適する。`modernc.org/sqlite` を使用するため CGO 不要
+  - `:memory:` でテスト用途も対応
+  - ConsumeRefreshToken はトランザクション + `used=0` CAS で atomic に実装
+- feat(store): Redis Store を追加（`store/redis`）
+  - go-redis v9 ベース。汎用分散 KV による複数インスタンス間状態共有向け
+  - ConsumeRefreshToken は埋め込み Lua script (`consume.lua`) で atomic に実装
+  - native TTL に委譲するため `Cleanup()` は no-op
+- feat(store): 適合性テストスイート `store/storetest` を追加。全 Store 実装で共通の挙動を保証
+- feat(cmd): `STORE_BACKEND` 環境変数で Store バックエンドを選択可能に
+  - `memory` (default) / `dynamodb` / `sqlite` / `redis`
+  - DynamoDB 切替も本リリースでバイナリから初対応（従来はライブラリ API のみ）
+  - 各バックエンドの env 仕様は `idproxy --help` または README 参照
+- feat(provider): Amazon Cognito User Pool を公式サポート対象に追加
+  - `cognito-idp.<region>.amazonaws.com` 形式の Issuer を `Amazon Cognito` として自動表示
+  - knownIssuers を完全一致 map + 正規表現パターン slice に拡張（順序保持・将来拡張容易）
+- feat(browser_auth): ID Token の `name` クレーム未設定時に fallback を導入
+  - 1) `cognito:username`（Amazon Cognito）→ 2) `preferred_username`（OIDC 標準）
+  - 既存 IdP（`name` クレーム提供）には影響なし
+- feat(testutil): `MockIdP.SetExtraClaims(map[string]any)` を追加
+  - `cognito:username` 等の IdP 固有クレームをテストで再現可能に
+
 ## [v0.3.1] - 2026-04-20
 
 ### Added

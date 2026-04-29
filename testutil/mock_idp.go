@@ -21,11 +21,12 @@ import (
 // httptest.Server を内包し、ES256 署名の ID Token を発行できる。
 type MockIdP struct {
 	// Server はテスト用 HTTP サーバー。URL を取得するのに使用する。
-	Server     *httptest.Server
-	privateKey *ecdsa.PrivateKey
-	keyID      string
-	codes      map[string]codeEntry
-	mu         sync.Mutex
+	Server      *httptest.Server
+	privateKey  *ecdsa.PrivateKey
+	keyID       string
+	codes       map[string]codeEntry
+	extraClaims map[string]any
+	mu          sync.Mutex
 }
 
 // codeEntry は Authorization Code に紐づくユーザー情報を保持する。
@@ -74,6 +75,25 @@ func NewMockIdP(t testing.TB) *MockIdP {
 // Issuer は OIDC Discovery の issuer フィールドと一致する URL を返す。
 func (m *MockIdP) Issuer() string {
 	return m.Server.URL
+}
+
+// SetExtraClaims は ID Token 発行時に追加するクレームを設定する。
+// Cognito の `cognito:username` / `cognito:groups` のような IdP 固有クレームを
+// テストで再現するために使用する。マップは shallow copy で取り込まれるため、
+// 呼び出し後にトップレベルキーを追加・削除しても影響しないが、参照型
+// （[]string・map・ポインタ等）の中身を呼び出し側で書き換えると反映される点に注意。
+func (m *MockIdP) SetExtraClaims(claims map[string]any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if claims == nil {
+		m.extraClaims = nil
+		return
+	}
+	cp := make(map[string]any, len(claims))
+	for k, v := range claims {
+		cp[k] = v
+	}
+	m.extraClaims = cp
 }
 
 // PublicKey は JWT 署名検証用の ECDSA 公開鍵を返す。
@@ -246,6 +266,15 @@ func (m *MockIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 	if entry.nonce != "" {
 		claims["nonce"] = entry.nonce
 	}
+
+	// SetExtraClaims で設定された追加クレームをマージ（既存クレームは上書きしない）
+	m.mu.Lock()
+	for k, v := range m.extraClaims {
+		if _, exists := claims[k]; !exists {
+			claims[k] = v
+		}
+	}
+	m.mu.Unlock()
 
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
 	token.Header["kid"] = m.keyID

@@ -274,7 +274,10 @@ func (m *MemoryStore) DeleteClient(ctx context.Context, clientID string) error {
 }
 
 // Cleanup は全マップを走査し、期限切れエントリを削除する。
-func (m *MemoryStore) Cleanup(_ context.Context) error {
+func (m *MemoryStore) Cleanup(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

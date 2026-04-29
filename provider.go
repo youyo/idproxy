@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/url"
+	"regexp"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -192,10 +193,20 @@ func (pm *ProviderManager) SelectionHTML() string {
 	return buf.String()
 }
 
-// knownIssuers は既知の OIDC Issuer ホスト名から表示名へのマッピング。
+// knownIssuers は既知の OIDC Issuer ホスト名から表示名へのマッピング（完全一致）。
 var knownIssuers = map[string]string{
 	"accounts.google.com":       "Google",
 	"login.microsoftonline.com": "Microsoft",
+}
+
+// knownIssuerPatterns はホスト名がリージョン等で動的になる Issuer の正規表現マッチ。
+// 順序を保ちたいため slice。
+var knownIssuerPatterns = []struct {
+	re   *regexp.Regexp
+	name string
+}{
+	// Amazon Cognito User Pool: cognito-idp.<region>.amazonaws.com
+	{regexp.MustCompile(`^cognito-idp\.[a-z0-9-]+\.amazonaws\.com$`), "Amazon Cognito"},
 }
 
 // resolveProviderName は OIDCProvider の表示名を解決する。
@@ -213,6 +224,11 @@ func resolveProviderName(p OIDCProvider) string {
 	host := u.Hostname()
 	if name, ok := knownIssuers[host]; ok {
 		return name
+	}
+	for _, kp := range knownIssuerPatterns {
+		if kp.re.MatchString(host) {
+			return kp.name
+		}
 	}
 	return host
 }

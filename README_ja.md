@@ -98,6 +98,9 @@ services:
 |-------------|--------------|-----------|
 | Google | `https://accounts.google.com` | [OpenID Connect — Google Identity](https://developers.google.com/identity/openid-connect/openid-connect) |
 | Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [アプリケーションの登録 — Microsoft ID プラットフォーム](https://learn.microsoft.com/ja-jp/entra/identity-platform/quickstart-register-app) |
+| Amazon Cognito | `https://cognito-idp.{region}.amazonaws.com/{user-pool-id}` | [ユーザープールのアプリクライアント設定 — Amazon Cognito](https://docs.aws.amazon.com/ja_jp/cognito/latest/developerguide/cognito-user-pools-app-idp-settings.html) |
+
+Amazon Cognito を使う場合は App Client の許可スコープに `openid email profile` を含めてください。Cognito の ID Token はユーザープールの構成によって `name` クレームを含まないことがあります。その場合 idproxy は自動的に `cognito:username`（さらに `preferred_username`）を表示名として fallback します。
 
 OIDC プロバイダーへ idproxy をクライアントとして登録する際は、リダイレクト URI を以下のように設定してください：
 
@@ -249,6 +252,32 @@ aws dynamodb scan \
 ```
 
 `used=true` は rotation 済みを示し、TTL により自動削除されます。
+
+## Store バックエンド
+
+idproxy はセッション・認可コード・アクセス/リフレッシュトークン・動的登録クライアントを `Store` インターフェース経由で永続化します。以下の実装を同梱しています。
+
+| バックエンド | パッケージ | 用途 | TTL 戦略 | refresh rotation の CAS |
+|---|---|---|---|---|
+| Memory | `store` (`NewMemoryStore`) | 単一インスタンス／開発／テスト | In-process タイマー + Cleanup ゴルーチン | Mutex |
+| DynamoDB | `store` (`NewDynamoDBStore`) | AWS マルチコンテナ (Lambda) | DynamoDB TTL | `ConditionExpression` |
+| SQLite | `store/sqlite` (`sqlite.New`) | 単一ノードのファイル永続化（CGO 不要） | 行ごとの `expires_at` + 5 分 Cleanup ゴルーチン | `BEGIN IMMEDIATE` + `used=0` CAS |
+| Redis | `store/redis` (`redis.New`) | 汎用分散 KV | ネイティブ `EX` | 埋め込み Lua script (`consume.lua`) |
+
+`idproxy` バイナリ利用時は `STORE_BACKEND` 環境変数でバックエンドを選択できます。各バックエンドが要求する env はバイナリの `--help` または [cmd/idproxy](cmd/idproxy) のソースを参照してください。
+
+### バイナリでの切替
+
+```sh
+# SQLite
+STORE_BACKEND=sqlite SQLITE_PATH=/var/lib/idproxy/state.db idproxy
+
+# Redis
+STORE_BACKEND=redis REDIS_ADDR=redis.internal:6379 idproxy
+
+# DynamoDB
+STORE_BACKEND=dynamodb DYNAMODB_TABLE_NAME=my-idproxy-table AWS_REGION=ap-northeast-1 idproxy
+```
 
 ## DynamoDB Store
 
