@@ -387,11 +387,28 @@ func runClientTests(t *testing.T, newStore Factory) {
 		defer cleanup()
 		ctx := context.Background()
 		c := NewClientData("client-del")
-		_ = s.SetClient(ctx, c.ClientID, c)
-		_ = s.DeleteClient(ctx, c.ClientID)
-		got, _ := s.GetClient(ctx, c.ClientID)
+		if err := s.SetClient(ctx, c.ClientID, c); err != nil {
+			t.Fatalf("SetClient: %v", err)
+		}
+		if err := s.DeleteClient(ctx, c.ClientID); err != nil {
+			t.Fatalf("DeleteClient: %v", err)
+		}
+		got, err := s.GetClient(ctx, c.ClientID)
+		if err != nil {
+			t.Fatalf("GetClient: %v", err)
+		}
 		if got != nil {
 			t.Error("expected nil after delete")
+		}
+	})
+
+	t.Run("DeleteNotFound", func(t *testing.T) {
+		s, cleanup := newStore(t)
+		defer cleanup()
+		ctx := context.Background()
+		// 存在しない clientID の DeleteClient は冪等で成功する契約。
+		if err := s.DeleteClient(ctx, "nonexistent-client"); err != nil {
+			t.Errorf("DeleteClient on missing key should be idempotent, got: %v", err)
 		}
 	})
 }
@@ -666,6 +683,7 @@ func runContextCanceledTests(t *testing.T, newStore Factory) {
 			{"DeleteAccessToken", func() error { return s.DeleteAccessToken(ctx, "x") }},
 			{"SetClient", func() error { return s.SetClient(ctx, "x", NewClientData("x")) }},
 			{"GetClient", func() error { _, err := s.GetClient(ctx, "x"); return err }},
+			{"DeleteClient", func() error { return s.DeleteClient(ctx, "x") }},
 			{"SetRefreshToken", func() error { return s.SetRefreshToken(ctx, "x", NewRefreshTokenData("x"), time.Hour) }},
 			{"GetRefreshToken", func() error { _, err := s.GetRefreshToken(ctx, "x"); return err }},
 			{"ConsumeRefreshToken", func() error { _, err := s.ConsumeRefreshToken(ctx, "x"); return err }},
