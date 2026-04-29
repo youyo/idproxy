@@ -151,10 +151,6 @@ func nowUnix() int64 {
 	return time.Now().UnixNano() / int64(time.Millisecond)
 }
 
-func expiryUnix(ttl time.Duration) int64 {
-	return nowUnix() + ttl.Milliseconds()
-}
-
 // --- Session ---
 
 func (s *Store) SetSession(ctx context.Context, id string, sess *idproxy.Session, ttl time.Duration) error {

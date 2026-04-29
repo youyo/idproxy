@@ -79,7 +79,11 @@ func New(opts Options) (*Store, error) {
 	if opts.CacheName == "" {
 		return nil, errors.New("momento: CacheName is required")
 	}
-	credProvider, err := auth.NewStringMomentoTokenProvider(opts.AuthToken)
+	// NewStringMomentoTokenProvider は SDK 内部で deprecated とマークされているが、
+	// v1 (legacy) 自己完結型 API キーをそのまま受け付ける唯一の公開 API。
+	// 後継 NewApiKeyV2TokenProvider は v2 キー + 別途 endpoint 指定を要求するため、
+	// 既存ユーザーの v1 キー利用を壊さないために当面これを使用する。
+	credProvider, err := auth.NewStringMomentoTokenProvider(opts.AuthToken) //nolint:staticcheck // SA1019: v1 キー互換を維持するため
 	if err != nil {
 		return nil, fmt.Errorf("momento: token provider: %w", err)
 	}
