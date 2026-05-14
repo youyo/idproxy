@@ -46,11 +46,28 @@ type Options struct {
 
 // Store は Redis ベースの idproxy.Store 実装。
 type Store struct {
-	client    redis.UniversalClient
-	prefix    string
-	consume   *redis.Script
-	closeOnce sync.Once
-	closeErr  error
+	client     redis.UniversalClient
+	prefix     string
+	consume    *redis.Script
+	ownsClient bool // true なら Close 時に client.Close() を呼ぶ
+	closeOnce  sync.Once
+	closeErr   error
+}
+
+// Option は Store 生成時の挙動を変更する Functional Option。
+// `NewWithClient(client, keyPrefix, opts...)` の末尾可変長引数で指定する。
+type Option func(*Store)
+
+// WithClientOwnership は外部から注入された Redis client を Store.Close() で閉じるかどうかを切り替える。
+// owns=true（デフォルト）の場合は Close() 時に client.Close() を呼ぶ。
+// owns=false の場合は呼ばない（呼び出し側が client の lifecycle を管理する想定）。
+//
+// 既存呼び出し `NewWithClient(client, "prefix:")` は引き続き有効。
+// owns=false にする場合は `NewWithClient(client, "prefix:", redisstore.WithClientOwnership(false))`。
+func WithClientOwnership(owns bool) Option {
+	return func(s *Store) {
+		s.ownsClient = owns
+	}
 }
 
 // New は Options から Store を生成する。生成後の Ping で疎通確認も行う。
@@ -73,14 +90,27 @@ func New(opts Options) (*Store, error) {
 	return NewWithClient(c, opts.KeyPrefix), nil
 }
 
-// NewWithClient は既存の redis.UniversalClient を使う Store を生成する（テスト用途）。
-// 渡された client の Close は Store.Close() が呼び出す。
-func NewWithClient(client redis.UniversalClient, keyPrefix string) *Store {
-	return &Store{
-		client:  client,
-		prefix:  keyPrefix,
-		consume: redis.NewScript(consumeLuaSource),
+// NewWithClient は既存の redis.UniversalClient を使う Store を生成する。
+// テスト用途、および外部のアプリケーションが既に保持している client を再利用するシナリオで使う。
+//
+// デフォルトでは Store.Close() 呼び出し時に渡された client の Close も呼ぶ
+// （後方互換、v0.4.2 までの挙動）。
+// Close を呼ばせたくない場合は `WithClientOwnership(false)` Option を渡す:
+//
+//	s := redisstore.NewWithClient(client, "prefix:", redisstore.WithClientOwnership(false))
+//
+// 既存呼び出し `redisstore.NewWithClient(client, "prefix:")` は引き続き有効。
+func NewWithClient(client redis.UniversalClient, keyPrefix string, opts ...Option) *Store {
+	s := &Store{
+		client:     client,
+		prefix:     keyPrefix,
+		consume:    redis.NewScript(consumeLuaSource),
+		ownsClient: true, // デフォルトは現状互換（Close 時に client も閉じる）
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 func (s *Store) k(ns, id string) string {
@@ -297,9 +327,12 @@ func (s *Store) Cleanup(ctx context.Context) error {
 }
 
 // Close は内部の redis.Client を閉じる。冪等（sync.Once で保護）。
+// `WithClientOwnership(false)` で生成された場合は client.Close() を呼ばず nil を返す。
 func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
-		s.closeErr = s.client.Close()
+		if s.ownsClient {
+			s.closeErr = s.client.Close()
+		}
 	})
 	return s.closeErr
 }
