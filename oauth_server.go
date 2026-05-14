@@ -804,8 +804,22 @@ func (s *OAuthServer) registerError(w http.ResponseWriter, errorCode, descriptio
 
 // redirectToLogin は未認証ユーザーをログインページにリダイレクトする。
 // 元の /authorize リクエスト URL を redirect_to パラメータで渡す。
+//
+// `PostLoginRedirectValidator` が設定済みの場合は escape 前の URL を Validator に通し、
+// reject 時は 400 を返す（Phase D-3）。escape は既存通り `url.QueryEscape` を使う。
 func (s *OAuthServer) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	originalURL := r.URL.String()
+	if v := s.config.PostLoginRedirectValidator; v != nil {
+		if vErr := callValidatorSafe(v, originalURL, s.logger, "oauth_redirect_to_login"); vErr != nil {
+			s.logger.Warn("idproxy: post-login redirect rejected by validator",
+				"redirect_to", originalURL,
+				"error", vErr,
+				"phase", "oauth_redirect_to_login",
+			)
+			http.Error(w, "invalid redirect_to", http.StatusBadRequest)
+			return
+		}
+	}
 	loginURL := fmt.Sprintf("%s/login?redirect_to=%s", s.config.PathPrefix, url.QueryEscape(originalURL))
 	http.Redirect(w, r, loginURL, http.StatusFound)
 }

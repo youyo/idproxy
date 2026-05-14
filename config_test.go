@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -390,5 +391,164 @@ func TestValidate_ExplicitRefreshTokenTTL(t *testing.T) {
 func TestDefaultConfig_RefreshTokenTTL(t *testing.T) {
 	if DefaultConfig.RefreshTokenTTL != 30*24*time.Hour {
 		t.Errorf("DefaultConfig.RefreshTokenTTL: got %v, want %v", DefaultConfig.RefreshTokenTTL, 30*24*time.Hour)
+	}
+}
+
+// --- M23: StrictPostLoginRedirectValidator テスト（T8-T17） ---
+
+// T8: 同一 origin の絶対 URL は通過する。
+func TestStrictValidator_AcceptsSameOriginAbsoluteURL(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	if err := v("https://app.example.com/dashboard"); err != nil {
+		t.Errorf("same-origin absolute URL should pass, got error: %v", err)
+	}
+}
+
+// T9: クロス origin の絶対 URL は拒否する。
+func TestStrictValidator_RejectsCrossOriginAbsoluteURL(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	if err := v("https://evil.example.com/x"); err == nil {
+		t.Error("cross-origin absolute URL should be rejected")
+	}
+}
+
+// T10: protocol-relative URL は拒否する。
+func TestStrictValidator_RejectsProtocolRelative(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	if err := v("//evil.example.com/x"); err == nil {
+		t.Error("protocol-relative URL should be rejected")
+	}
+}
+
+// T11: javascript: スキームは拒否する。
+func TestStrictValidator_RejectsJavascriptScheme(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	if err := v("javascript:alert(1)"); err == nil {
+		t.Error("javascript: scheme should be rejected")
+	}
+}
+
+// T12: data: スキームは拒否する。
+func TestStrictValidator_RejectsDataScheme(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	if err := v("data:text/html,<script>"); err == nil {
+		t.Error("data: scheme should be rejected")
+	}
+}
+
+// T13(M23): backslash 文字を含む URL は拒否する。
+func TestStrictValidator_RejectsBackslash(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	if err := v("/\\evil.example.com"); err == nil {
+		t.Error("backslash should be rejected")
+	}
+}
+
+// T14: タブ・改行・ゼロ幅文字を含む URL は拒否する。
+func TestStrictValidator_RejectsTabsAndControl(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	cases := []string{
+		"/\tjavascript:alert(1)",
+		"/foo\nbar",
+		"/foo\u200bbar", // zero-width space (escape sequence; literal U+200B avoided per ST1018)
+	}
+	for _, c := range cases {
+		if err := v(c); err == nil {
+			t.Errorf("input %q with control char should be rejected", c)
+		}
+	}
+}
+
+// T15: NFKC 正規化前後で差分のある入力は拒否する。
+func TestStrictValidator_RejectsUnicodeNormalizationDiff(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	// 全角スラッシュ U+FF0F は NFKC で "/" になり差分が生じる
+	if err := v("／evil.example.com"); err == nil {
+		t.Error("non-NFKC input should be rejected")
+	}
+}
+
+// T16: カスタム Validator のエラーは BrowserAuth の 400 路を通る前提のため、ここでは
+// Validator 自体がエラーを正しく返すかだけを確認する。
+func TestStrictValidator_CustomReject(t *testing.T) {
+	custom := func(string) error { return errors.New("nope") }
+	if err := custom("/foo"); err == nil {
+		t.Error("custom validator should return error")
+	}
+}
+
+// T17: Validator=nil のときは何も検査されない（v0.4.2 までの動作互換）。
+func TestStrictValidator_NilValidator_AcceptsAnything(t *testing.T) {
+	cfg := validConfig()
+	cfg.PostLoginRedirectValidator = nil
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("nil validator config should validate: %v", err)
+	}
+}
+
+// T18: DefaultPostLoginPath が Validator に通らない値（"//evil.com"）の場合は Validate がエラー。
+func TestConfig_Validate_DefaultPostLoginPath_AppliesValidator(t *testing.T) {
+	cfg := validConfig()
+	cfg.DefaultPostLoginPath = "//evil.com"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("protocol-relative DefaultPostLoginPath should be rejected by Validate")
+	}
+}
+
+// T19: DefaultPostLoginPath は先頭スラッシュが必須。
+func TestConfig_Validate_DefaultPostLoginPath_LeadingSlash(t *testing.T) {
+	cfg := validConfig()
+	cfg.DefaultPostLoginPath = "no-slash"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("DefaultPostLoginPath without leading '/' should be rejected")
+	}
+}
+
+// 追加: 空文字列の DefaultPostLoginPath は許容（後方互換）。
+func TestConfig_Validate_DefaultPostLoginPath_Empty(t *testing.T) {
+	cfg := validConfig()
+	cfg.DefaultPostLoginPath = ""
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("empty DefaultPostLoginPath should be allowed: %v", err)
+	}
+}
+
+// 追加: 有効な値（"/dashboard"）は通過する。
+func TestConfig_Validate_DefaultPostLoginPath_Valid(t *testing.T) {
+	cfg := validConfig()
+	cfg.DefaultPostLoginPath = "/dashboard"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("valid DefaultPostLoginPath '/dashboard' should be allowed: %v", err)
+	}
+}
+
+// 追加: UseStrictPostLoginRedirectValidator setter ヘルパーの動作確認。
+func TestConfig_UseStrictPostLoginRedirectValidator_Setter(t *testing.T) {
+	cfg := validConfig()
+	if cfg.PostLoginRedirectValidator != nil {
+		t.Fatal("default PostLoginRedirectValidator should be nil")
+	}
+	cfg.UseStrictPostLoginRedirectValidator()
+	if cfg.PostLoginRedirectValidator == nil {
+		t.Fatal("PostLoginRedirectValidator should be set after UseStrictPostLoginRedirectValidator()")
+	}
+	// 検査が機能するか
+	if err := cfg.PostLoginRedirectValidator("javascript:alert(1)"); err == nil {
+		t.Error("UseStrictPostLoginRedirectValidator should reject javascript:")
+	}
+	if err := cfg.PostLoginRedirectValidator("/dashboard"); err != nil {
+		t.Errorf("UseStrictPostLoginRedirectValidator should accept relative path: %v", err)
+	}
+}
+
+// 追加: ErrUnsafePostLoginRedirect は wrap されており errors.Is で判定できる。
+func TestStrictValidator_ErrIsWrapped(t *testing.T) {
+	v := StrictPostLoginRedirectValidator("https://app.example.com")
+	err := v("javascript:alert(1)")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrUnsafePostLoginRedirect) {
+		t.Errorf("error should wrap ErrUnsafePostLoginRedirect, got: %v", err)
 	}
 }

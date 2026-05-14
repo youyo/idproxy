@@ -618,3 +618,348 @@ func TestIsEmailAuthorized(t *testing.T) {
 		})
 	}
 }
+
+// --- M23: DefaultPostLoginPath / OnAuthenticated / Validator テスト ---
+
+// performLogin は MockIdP を相手に LoginHandler + CallbackHandler を流して
+// state/code/redirect を解決し、最終の callback ResponseRecorder を返す。
+// 認証は成功する前提。失敗時は t.Fatalf。
+func performLogin(t *testing.T, ba *BrowserAuth, idp *testutil.MockIdP, redirectToQuery string) *httptest.ResponseRecorder {
+	t.Helper()
+	target := "/login"
+	if redirectToQuery != "" {
+		target += "?redirect_to=" + url.QueryEscape(redirectToQuery)
+	}
+	loginReq := httptest.NewRequest(http.MethodGet, target, nil)
+	loginRec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusFound {
+		t.Fatalf("login: expected 302, got %d (body: %s)", loginRec.Code, loginRec.Body.String())
+	}
+	loc, _ := url.Parse(loginRec.Header().Get("Location"))
+	state := loc.Query().Get("state")
+	nonce := loc.Query().Get("nonce")
+	code := idp.IssueCode("test-user-id", "test@example.com", "test-client-id", nonce)
+
+	cbReq := httptest.NewRequest(http.MethodGet,
+		"/callback?code="+code+"&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	ba.CallbackHandler().ServeHTTP(cbRec, cbReq)
+	return cbRec
+}
+
+// stateRedirectURIFromLogin は LoginHandler を呼んで state に保存された RedirectURI を取得する。
+func stateRedirectURIFromLogin(t *testing.T, ba *BrowserAuth, redirectToQuery string) string {
+	t.Helper()
+	target := "/login"
+	if redirectToQuery != "" {
+		target += "?redirect_to=" + url.QueryEscape(redirectToQuery)
+	}
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	rec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("login: expected 302, got %d", rec.Code)
+	}
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	state := loc.Query().Get("state")
+	sd, err := ba.store.GetAuthCode(context.Background(), state)
+	if err != nil || sd == nil {
+		t.Fatalf("GetAuthCode(state=%q) failed: data=%v err=%v", state, sd, err)
+	}
+	return sd.RedirectURI
+}
+
+// T1: DefaultPostLoginPath="/dashboard" + クエリなしで state.RedirectURI が "/dashboard"。
+func TestLoginHandler_DefaultPostLoginPath_Configured(t *testing.T) {
+	ba, _ := setupBrowserAuth(t, func(c *Config) {
+		c.DefaultPostLoginPath = "/dashboard"
+	})
+	got := stateRedirectURIFromLogin(t, ba, "")
+	if got != "/dashboard" {
+		t.Errorf("state.RedirectURI = %q, want %q", got, "/dashboard")
+	}
+}
+
+// T2: DefaultPostLoginPath="" + クエリなしで state.RedirectURI が "/"（後方互換）。
+func TestLoginHandler_DefaultPostLoginPath_Empty(t *testing.T) {
+	ba, _ := setupBrowserAuth(t)
+	got := stateRedirectURIFromLogin(t, ba, "")
+	if got != "/" {
+		t.Errorf("state.RedirectURI = %q, want %q", got, "/")
+	}
+}
+
+// T3: Validator が設定済みの場合、相対パスはそのまま通過する。
+func TestLoginHandler_RedirectValidator_AcceptsRelativePath(t *testing.T) {
+	ba, _ := setupBrowserAuth(t, func(c *Config) {
+		c.UseStrictPostLoginRedirectValidator()
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/login?redirect_to=/foo", nil)
+	ba.LoginHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Errorf("expected 302 for relative path with Strict Validator, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// T4: OnAuthenticated が ("/custom", false) を返したら /custom へ 302。
+func TestCallbackHandler_OnAuthenticated_OverridesRedirect(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			return "/custom", false
+		}
+	})
+	rec := performLogin(t, ba, idp, "/protected")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/custom" {
+		t.Errorf("Location = %q, want %q", loc, "/custom")
+	}
+}
+
+// T5: OnAuthenticated が ("", true) を返し、内部で 200 OK を書き込む。
+func TestCallbackHandler_OnAuthenticated_Handled(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			w.WriteHeader(http.StatusOK)
+			return "", true
+		}
+	})
+	rec := performLogin(t, ba, idp, "/protected")
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("Location should be empty for handled=true, got %q", loc)
+	}
+}
+
+// T6: OnAuthenticated 未設定なら現状通り stateData.RedirectURI へ 302（既存テストの回帰確認）。
+func TestCallbackHandler_OnAuthenticated_Nil_Fallback(t *testing.T) {
+	ba, idp := setupBrowserAuth(t)
+	rec := performLogin(t, ba, idp, "/protected")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/protected" {
+		t.Errorf("Location = %q, want %q", loc, "/protected")
+	}
+}
+
+// T7: OnAuthenticated が ("", false) を返した場合は state の RedirectURI を使う。
+func TestCallbackHandler_OnAuthenticated_EmptyReturn_Fallback(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			return "", false
+		}
+	})
+	rec := performLogin(t, ba, idp, "/protected")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/protected" {
+		t.Errorf("Location = %q, want %q", loc, "/protected")
+	}
+}
+
+// T20: OnAuthenticated が panic したら 500 を返す。
+func TestCallbackHandler_HookPanic_Returns500(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			panic("boom")
+		}
+	})
+	rec := performLogin(t, ba, idp, "/protected")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 after hook panic, got %d", rec.Code)
+	}
+}
+
+// T21: フックが http.Redirect で書きつつ handled=false を返した場合、
+// 最初の Location ヘッダがフック側の指定値であり、BrowserAuth は二重書き込みを行わない。
+func TestCallbackHandler_HookAlreadyWrote_NoSecondRedirect(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			http.Redirect(w, r, "/x", http.StatusFound)
+			return "", false
+		}
+	})
+	rec := performLogin(t, ba, idp, "/protected")
+	if rec.Code != http.StatusFound {
+		t.Errorf("status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/x" {
+		t.Errorf("Location = %q, want %q", loc, "/x")
+	}
+}
+
+// T22: 呼び出し中に r.Context() が canceled になっても 200/300 系の書き込みをせず終了する。
+// （ハンドラ自身が return しているかは外部観測できないため、status code が default 200 で
+//
+//	Location ヘッダ無しという外部可観測契約のみ検証する。）
+func TestCallbackHandler_HookContextCanceled(t *testing.T) {
+	cancelCh := make(chan struct{})
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			// 呼び出し中に context を cancel する
+			if cancel, ok := r.Context().Value(testCancelKey{}).(context.CancelFunc); ok {
+				cancel()
+				close(cancelCh)
+			}
+			return "/should-not-be-used", false
+		}
+	})
+
+	// /login で state 確立
+	loginReq := httptest.NewRequest(http.MethodGet, "/login?redirect_to=/protected", nil)
+	loginRec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(loginRec, loginReq)
+	loc, _ := url.Parse(loginRec.Header().Get("Location"))
+	state := loc.Query().Get("state")
+	nonce := loc.Query().Get("nonce")
+	code := idp.IssueCode("u", "u@example.com", "test-client-id", nonce)
+
+	// /callback リクエストに cancel 可能 context を仕込む
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = context.WithValue(ctx, testCancelKey{}, cancel)
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil).WithContext(ctx)
+	cbRec := httptest.NewRecorder()
+	ba.CallbackHandler().ServeHTTP(cbRec, cbReq)
+
+	// hook 内で cancel された場合、BrowserAuth は何も書かないため
+	// Location ヘッダは空 / 302 になっていないことを検証
+	if cbRec.Header().Get("Location") != "" {
+		t.Errorf("Location should be empty after context cancellation, got %q", cbRec.Header().Get("Location"))
+	}
+	if cbRec.Code == http.StatusFound {
+		t.Errorf("status should not be 302 after context cancellation, got %d", cbRec.Code)
+	}
+}
+
+// testCancelKey は T22 用の context key
+type testCancelKey struct{}
+
+// T23: Validator が panic したら 500 を返す。
+// Validator は CallbackHandler 内のフック戻り値検査時に panic させ、500 を期待する。
+// （LoginHandler 内では reject 系の正常パスで panic させずに通す。）
+func TestCallbackHandler_ValidatorPanic_Returns500(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.PostLoginRedirectValidator = func(s string) error {
+			// "/panic-me" だけ panic させる。LoginHandler の "/" や "/protected" は通す。
+			if s == "/panic-me" {
+				panic("validator boom")
+			}
+			return nil
+		}
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			return "/panic-me", false
+		}
+	})
+	rec := performLogin(t, ba, idp, "/protected")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 after validator panic in callback hook, got %d", rec.Code)
+	}
+}
+
+// T24: handled=true && redirectTo!="" のとき、フック側応答を尊重しリダイレクトしない。
+func TestCallbackHandler_HandledTrue_RedirectToNonEmpty_RedirectIgnored(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			// フックは何も書かないが handled=true を宣言。redirectTo は ignore される。
+			return "/x-ignored", true
+		}
+	})
+	rec := performLogin(t, ba, idp, "/protected")
+	if rec.Code == http.StatusFound {
+		t.Errorf("status should not be 302 when handled=true; got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("Location should be empty when handled=true, got %q", loc)
+	}
+}
+
+// T25: SelectionHandler に redirect_to が指定された場合、loginURL の値が URL escape されている。
+func TestSelectionHandler_RedirectToIsURLEscaped(t *testing.T) {
+	// 複数プロバイダーだと選択ページが返るため、単一プロバイダー（既存 setupBrowserAuth）でテスト。
+	ba, _ := setupBrowserAuth(t)
+	req := httptest.NewRequest(http.MethodGet, "/select?redirect_to=/foo%26bar=baz", nil)
+	rec := httptest.NewRecorder()
+	ba.SelectionHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	// URL escape された後の `%2F` (`/`) と `%26` (`&`) を含むこと
+	if !strings.Contains(loc, "redirect_to=") {
+		t.Fatalf("Location should contain redirect_to=, got %q", loc)
+	}
+	// `&` が escape されていないと SelectionHandler の素朴連結バグが残存
+	// 連結後の loginURL を分解し、redirect_to クエリ値が "/foo&bar=baz" にデコードされること
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	gotRT := u.Query().Get("redirect_to")
+	if gotRT != "/foo&bar=baz" {
+		t.Errorf("redirect_to (decoded) = %q, want %q", gotRT, "/foo&bar=baz")
+	}
+}
+
+// T26: Strict Validator 設定済みでフックが unsafe redirect ("javascript:...") を返したら 500。
+func TestCallbackHandler_HookReturnsInvalidRedirect_RejectedByValidator(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.UseStrictPostLoginRedirectValidator()
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			return "javascript:alert(1)", false
+		}
+	})
+	rec := performLogin(t, ba, idp, "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for unsafe hook redirect, got %d", rec.Code)
+	}
+}
+
+// T27: Validator=nil でフックが ("/x", false) を返した場合は /x へ 302（既存動作互換）。
+func TestCallbackHandler_HookReturnsValidRedirect_ValidatorNil_Passes(t *testing.T) {
+	ba, idp := setupBrowserAuth(t, func(c *Config) {
+		c.PostLoginRedirectValidator = nil
+		c.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *User) (string, bool) {
+			return "/x", false
+		}
+	})
+	rec := performLogin(t, ba, idp, "")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/x" {
+		t.Errorf("Location = %q, want %q", loc, "/x")
+	}
+}
+
+// 追加: LoginHandler の redirect_to クエリが Strict Validator で reject される場合 400。
+func TestLoginHandler_RedirectValidator_Reject_400(t *testing.T) {
+	ba, _ := setupBrowserAuth(t, func(c *Config) {
+		c.UseStrictPostLoginRedirectValidator()
+	})
+	req := httptest.NewRequest(http.MethodGet, "/login?redirect_to="+url.QueryEscape("javascript:alert(1)"), nil)
+	rec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for javascript: redirect_to, got %d", rec.Code)
+	}
+}
+
+// 追加: SelectionHandler の redirect_to クエリが Strict Validator で reject される場合 400。
+func TestSelectionHandler_RedirectValidator_Reject_400(t *testing.T) {
+	ba, _ := setupBrowserAuth(t, func(c *Config) {
+		c.UseStrictPostLoginRedirectValidator()
+	})
+	req := httptest.NewRequest(http.MethodGet, "/select?redirect_to="+url.QueryEscape("//evil.example.com/x"), nil)
+	rec := httptest.NewRecorder()
+	ba.SelectionHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for protocol-relative redirect_to in /select, got %d", rec.Code)
+	}
+}

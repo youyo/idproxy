@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- feat(config): `OnAuthenticated` フック / `DefaultPostLoginPath` / `PostLoginRedirectValidator` を `Config` に追加
+  - ゼロ値で v0.4.2 までの動作維持（純粋 API 追加、SemVer minor bump 互換）
+  - `OnAuthenticated` は認証完了直後（セッション発行直後）に同期で呼ばれる。フック内 panic は recover して 500 を返す
+  - `OnAuthenticated` の戻り値 `(redirectTo, handled)` 4 状態の挙動は godoc に明文化
+- feat(config): `StrictPostLoginRedirectValidator(externalURL)` helper と `(*Config).UseStrictPostLoginRedirectValidator()` setter を公開
+  - 同一 origin の絶対 URL および相対パスのみを許可。多段検査（TrimSpace / unicode.IsControl|Cf / 構造文字 / NFKC 正規化 / url.Parse）で `javascript:` / `data:` / protocol-relative / backslash / 同形異字攻撃を拒否
+  - opt-in 推奨。既存利用者の動作は壊さない
+- feat(store/redis): `WithClientOwnership(bool)` Option を追加
+  - `NewWithClient(client, keyPrefix string, opts ...Option)` に末尾可変引数を追加（既存 2 引数呼び出しは引き続き有効）
+  - デフォルトは `ownsClient=true`（v0.4.2 まで互換）。外部注入 client を Close したくない場合は `WithClientOwnership(false)` を渡す
+
+### Security
+
+- security: `redirect_to` クエリの URL escape および Validator 適用を全リダイレクト入口で統一
+  - `Auth.handleUnauthenticated`: 元 URL を `url.QueryEscape` してから loginURL に連結（escape 漏れ修正）
+  - `BrowserAuth.SelectionHandler`: 同上、Validator 適用
+  - `BrowserAuth.LoginHandler` / `OAuthServer.redirectToLogin`: `PostLoginRedirectValidator` を適用
+  - `OnAuthenticated` フック戻り値の `redirectTo` も Validator を通す
+  - Validator が non-nil のときは reject で 400（入力起因）。フック戻り値起因は 500
+  - Validator panic は BrowserAuth 側で recover して 500（`http.ErrAbortHandler` のみ再 panic）
+
+### Documentation
+
+- docs: post-login redirect 挙動・カスケード OAuth パターン・Store 共存・middleware migration ガイドを README / README_ja / `doc.go` に追加
+- docs: `docs/store-coexistence.md` を新規作成（Client ownership matrix、DynamoDB 単一テーブル共存、Redis prefix 分離、SQLite 制約と将来計画、shutdown 順序）
+- docs: `docs/cascade-oauth-pattern.md` を新規作成（責務分割・state 管理・トークン保存先選定・失敗時フロー・セキュリティチェックリスト・anti-patterns）
+- docs(store): `DynamoDB Store` の godoc に「注入 client は Close で閉じない（AWS SDK v2 慣習）」を明文化
+- docs(examples): `examples/cascade-oauth` と `examples/dynamodb-coexist` を新規追加
+  - cascade-oauth: `OnAuthenticated` で外部 OAuth 接続状態を分岐する最小サンプル + migration 例
+  - dynamodb-coexist: idproxy と利用側業務データを同一 DynamoDB テーブルで共存させるサンプル + `table.json` + 最小 IAM ポリシー
+- ci: `.github/workflows/ci.yml` の build job に `go build ./examples/...` と `go test ./examples/...` を追加
+
 - feat(store): SQLite Store を追加（`store/sqlite`）
   - 単一ノードでのファイルベース永続化に適する。`modernc.org/sqlite` を使用するため CGO 不要
   - `:memory:` でテスト用途も対応

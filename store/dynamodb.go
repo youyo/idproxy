@@ -64,7 +64,17 @@ func NewDynamoDBStore(tableName, region string) (*DynamoDBStore, error) {
 	}, nil
 }
 
-// NewDynamoDBStoreWithClient はテスト用コンストラクタで、DynamoDBClient の任意実装を注入できる。
+// NewDynamoDBStoreWithClient はテスト用および外部から既存の DynamoDBClient を再利用する
+// コンストラクタ。
+//
+// クライアントの lifecycle について（M23: Store coexistence ガイダンス）:
+//   - 注入された client は DynamoDBStore.Close() で **閉じない**。AWS SDK v2 は
+//     io.Closer を実装しておらず、SDK 公式の慣習に従い GC に委譲する。
+//   - 同一プロセス内で他のロジックが同じ client を共有する用途（例: 利用側アプリの
+//     業務テーブルアクセス）にも安全に注入できる。
+//   - Redis Store は対称的に WithClientOwnership Option で挙動を切替可能だが、
+//     DynamoDB は元から非破壊なので Option は不要（v0.5.0 設計判断）。
+//   - 詳細は docs/store-coexistence.md を参照。
 func NewDynamoDBStoreWithClient(client DynamoDBClient, tableName string) *DynamoDBStore {
 	return &DynamoDBStore{
 		client:    client,
@@ -612,6 +622,11 @@ func (s *DynamoDBStore) Cleanup(_ context.Context) error {
 
 // Close はストアを閉じる。以降の操作は errDynamoDBStoreClosed を返す。
 // 二重呼び出しは安全（sync.Once + atomic.Bool で保護）。
+//
+// 注入された AWS SDK v2 DynamoDB client は **閉じない**（AWS SDK v2 の慣習に従い
+// GC に委譲）。Redis Store の WithClientOwnership 相当の Option は提供しない
+// （対称性のための「形だけ Option」は混乱の元と判断、v0.5.0 設計判断）。
+// 詳細は docs/store-coexistence.md および NewDynamoDBStoreWithClient の godoc を参照。
 func (s *DynamoDBStore) Close() error {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)

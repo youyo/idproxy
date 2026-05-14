@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -27,14 +29,17 @@ const browserAuthStateMarker = "browser-auth-state"
 // LoginHandler で IdP へのリダイレクトを行い、
 // CallbackHandler で認可コードを ID Token に交換してセッションを発行する。
 type BrowserAuth struct {
-	pm             *ProviderManager
-	sm             *SessionManager
-	store          Store
-	allowedDomains []string
-	allowedEmails  []string
-	externalURL    string
-	pathPrefix     string
-	logger         *slog.Logger
+	pm                         *ProviderManager
+	sm                         *SessionManager
+	store                      Store
+	allowedDomains             []string
+	allowedEmails              []string
+	externalURL                string
+	pathPrefix                 string
+	defaultPostLoginPath       string
+	onAuthenticated            func(w http.ResponseWriter, r *http.Request, user *User) (string, bool)
+	postLoginRedirectValidator func(string) error
+	logger                     *slog.Logger
 }
 
 // NewBrowserAuth は新しい BrowserAuth を生成する。
@@ -44,15 +49,40 @@ func NewBrowserAuth(cfg Config, pm *ProviderManager, sm *SessionManager, store S
 		logger = slog.Default()
 	}
 	return &BrowserAuth{
-		pm:             pm,
-		sm:             sm,
-		store:          store,
-		allowedDomains: cfg.AllowedDomains,
-		allowedEmails:  cfg.AllowedEmails,
-		externalURL:    cfg.ExternalURL,
-		pathPrefix:     cfg.PathPrefix,
-		logger:         logger,
+		pm:                         pm,
+		sm:                         sm,
+		store:                      store,
+		allowedDomains:             cfg.AllowedDomains,
+		allowedEmails:              cfg.AllowedEmails,
+		externalURL:                cfg.ExternalURL,
+		pathPrefix:                 cfg.PathPrefix,
+		defaultPostLoginPath:       cfg.DefaultPostLoginPath,
+		onAuthenticated:            cfg.OnAuthenticated,
+		postLoginRedirectValidator: cfg.PostLoginRedirectValidator,
+		logger:                     logger,
 	}
+}
+
+// validatePostLoginRedirect は post-login redirect 先を Validator に通す。
+// Validator が nil なら nil（パス）。panic は recover して error として返す。
+// 呼び出し側は err != nil なら 400/500 を返す前提。
+func (ba *BrowserAuth) validatePostLoginRedirect(redirectTo string) (err error) {
+	if ba.postLoginRedirectValidator == nil {
+		return nil
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			if rec == http.ErrAbortHandler {
+				panic(rec) // サーバ側のクライアント切断扱いと整合させる
+			}
+			ba.logger.Error("idproxy: panic in PostLoginRedirectValidator",
+				"recover", fmt.Sprintf("%v", rec),
+				"stack", string(debug.Stack()),
+			)
+			err = fmt.Errorf("idproxy: panic in PostLoginRedirectValidator: %v", rec)
+		}
+	}()
+	return ba.postLoginRedirectValidator(redirectTo)
 }
 
 // LoginHandler は GET /login を処理し、IdP へのリダイレクトを行う。
@@ -106,10 +136,26 @@ func (ba *BrowserAuth) LoginHandler() http.Handler {
 			return
 		}
 
-		// 元の URL を取得
+		// 元の URL を取得（クエリ指定 → Config.DefaultPostLoginPath → "/" の順）
 		redirectTo := r.URL.Query().Get("redirect_to")
 		if redirectTo == "" {
-			redirectTo = "/"
+			if ba.defaultPostLoginPath != "" {
+				redirectTo = ba.defaultPostLoginPath
+			} else {
+				redirectTo = "/"
+			}
+		}
+
+		// Validator チェック（nil なら no-op）。
+		// 不正な入力は 400（入力起因なので 500 ではない）。
+		if vErr := ba.validatePostLoginRedirect(redirectTo); vErr != nil {
+			ba.logger.Warn("idproxy: post-login redirect rejected by validator",
+				"redirect_to", redirectTo,
+				"error", vErr,
+				"phase", "login",
+			)
+			http.Error(w, "invalid redirect_to", http.StatusBadRequest)
+			return
 		}
 
 		// state を Store に保存（AuthCodeData を再利用）
@@ -297,9 +343,112 @@ func (ba *BrowserAuth) CallbackHandler() http.Handler {
 			return
 		}
 
+		// OnAuthenticated フックを呼び出し、戻り値で post-login のリダイレクト挙動を決定する。
+		// 4 状態の解釈は Config.OnAuthenticated の godoc を参照。
+		if ba.onAuthenticated != nil {
+			// 呼び出し前の context cancellation チェック（client disconnect）
+			if ctxErr := r.Context().Err(); ctxErr != nil {
+				ba.logger.Debug("idproxy: context canceled before OnAuthenticated", "error", ctxErr)
+				return
+			}
+
+			hookRedirect, hookHandled, hookPanicked := ba.invokeOnAuthenticated(w, r, user)
+			if hookPanicked {
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+
+			// 呼び出し後の context cancellation チェック
+			if ctxErr := r.Context().Err(); ctxErr != nil {
+				ba.logger.Debug("idproxy: context canceled after OnAuthenticated", "error", ctxErr)
+				return
+			}
+
+			if hookHandled {
+				// フック側で応答済みと宣言された場合は何もしない。
+				// hookRedirect は無視する（godoc 上の契約）。
+				_ = hookRedirect
+				return
+			}
+
+			if hookRedirect != "" {
+				// フックが返した redirectTo を Validator に通してから 302。
+				if vErr := ba.validatePostLoginRedirect(hookRedirect); vErr != nil {
+					ba.logger.Error("idproxy: OnAuthenticated returned unsafe redirect",
+						"redirect_to", hookRedirect,
+						"error", vErr,
+						"phase", "callback_hook",
+					)
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+					return
+				}
+				http.Redirect(w, r, hookRedirect, http.StatusFound)
+				return
+			}
+			// hookHandled=false && hookRedirect=="" → 既存の redirectTo（stateData.RedirectURI）を使う
+		}
+
 		// 元の URL にリダイレクト
 		http.Redirect(w, r, redirectTo, http.StatusFound)
 	})
+}
+
+// invokeOnAuthenticated は OnAuthenticated フックを panic 安全に呼び出す。
+// panic 時はログを残し panicked=true を返す。`http.ErrAbortHandler` は再 panic。
+// 多重 redirect 検知（フックが書き込みつつ handled=false を返す）は best-effort で
+// `responseObserver` を介して `wroteHeader` を観測し warn ログを出す。
+func (ba *BrowserAuth) invokeOnAuthenticated(w http.ResponseWriter, r *http.Request, user *User) (redirectTo string, handled bool, panicked bool) {
+	obs := &responseObserver{ResponseWriter: w}
+	defer func() {
+		if rec := recover(); rec != nil {
+			if rec == http.ErrAbortHandler {
+				panic(rec)
+			}
+			ba.logger.Error("idproxy: panic in OnAuthenticated hook",
+				"recover", fmt.Sprintf("%v", rec),
+				"stack", string(debug.Stack()),
+				"phase", "callback",
+			)
+			panicked = true
+		}
+	}()
+
+	redirectTo, handled = ba.onAuthenticated(obs, r, user)
+
+	// フックが応答を書き込みつつ handled=false を返した場合は警告ログ。BrowserAuth 側で
+	// 二重書き込みは行わず handled=true として扱う（外部可観測契約：最初のステータス保持）。
+	if !handled && obs.wroteHeader {
+		ba.logger.Warn("idproxy: hook wrote response but returned handled=false; ignoring second redirect",
+			"first_status", obs.status,
+			"phase", "callback",
+		)
+		handled = true
+		redirectTo = ""
+	}
+	return redirectTo, handled, panicked
+}
+
+// responseObserver はフックが ResponseWriter に書き込んだか観測するための ResponseWriter ラッパー。
+type responseObserver struct {
+	http.ResponseWriter
+	wroteHeader bool
+	status      int
+}
+
+func (o *responseObserver) WriteHeader(code int) {
+	if !o.wroteHeader {
+		o.wroteHeader = true
+		o.status = code
+	}
+	o.ResponseWriter.WriteHeader(code)
+}
+
+func (o *responseObserver) Write(b []byte) (int, error) {
+	if !o.wroteHeader {
+		o.wroteHeader = true
+		o.status = http.StatusOK
+	}
+	return o.ResponseWriter.Write(b)
 }
 
 // SelectionHandler は複数 IdP 時のプロバイダー選択ページを表示する。
@@ -308,9 +457,19 @@ func (ba *BrowserAuth) SelectionHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ba.pm.Count() == 1 {
 			loginURL := ba.pathPrefix + "/login"
-			// redirect_to パラメータがあればそのまま渡す
+			// redirect_to パラメータがあれば Validator → URL escape の順に通して連結する。
+			// Phase D-2: 素朴連結だと `?redirect_to=/foo&provider=evil` のような注入を許す穴があった。
 			if rt := r.URL.Query().Get("redirect_to"); rt != "" {
-				loginURL += "?redirect_to=" + rt
+				if vErr := ba.validatePostLoginRedirect(rt); vErr != nil {
+					ba.logger.Warn("idproxy: post-login redirect rejected by validator",
+						"redirect_to", rt,
+						"error", vErr,
+						"phase", "select",
+					)
+					http.Error(w, "invalid redirect_to", http.StatusBadRequest)
+					return
+				}
+				loginURL += "?redirect_to=" + url.QueryEscape(rt)
 			}
 			http.Redirect(w, r, loginURL, http.StatusFound)
 			return

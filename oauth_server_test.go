@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +22,7 @@ import (
 // --- OAuthServer テスト用ヘルパー ---
 
 // setupOAuthServer はテスト用の OAuthServer を構築する。
-func setupOAuthServer(t *testing.T, externalURL, pathPrefix string) *OAuthServer {
+func setupOAuthServer(t *testing.T, externalURL, pathPrefix string, opts ...func(*Config)) *OAuthServer {
 	t.Helper()
 
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -46,6 +47,10 @@ func setupOAuthServer(t *testing.T, externalURL, pathPrefix string) *OAuthServer
 		OAuth: &OAuthConfig{
 			SigningKey: privateKey,
 		},
+	}
+
+	for _, o := range opts {
+		o(&cfg)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -2758,5 +2763,42 @@ func TestToken_AccessTokenTTL_FromConfig(t *testing.T) {
 	storeTTL := tokenData.ExpiresAt.Sub(tokenData.IssuedAt)
 	if storeTTL < 29*time.Minute || storeTTL > 31*time.Minute {
 		t.Errorf("expected store TTL ≈ 30 min, got %v", storeTTL)
+	}
+}
+
+// --- M23 Phase D-3: redirectToLogin Validator 適用テスト ---
+
+// T31: PostLoginRedirectValidator が設定済みで reject を返した場合、
+// redirectToLogin は 400 Bad Request を返す（302 にしない）。
+func TestOAuthServer_RedirectToLogin_ValidatorReject_400(t *testing.T) {
+	srv := setupOAuthServer(t, "https://app.example.com", "", func(c *Config) {
+		c.PostLoginRedirectValidator = func(string) error { return errors.New("nope") }
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/authorize?client_id=x&response_type=code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.redirectToLogin(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 when validator rejects, got %d (loc=%q)", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+// 補助: Validator=nil（既定）なら従来通り 302 を返す（回帰確認）。
+func TestOAuthServer_RedirectToLogin_NoValidator_Returns302(t *testing.T) {
+	srv := setupOAuthServer(t, "https://app.example.com", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/authorize?client_id=x&response_type=code", nil)
+	rec := httptest.NewRecorder()
+
+	srv.redirectToLogin(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("expected 302 when validator is nil, got %d", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/login?redirect_to=") {
+		t.Errorf("Location should start with /login?redirect_to=, got %q", loc)
 	}
 }

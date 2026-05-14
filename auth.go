@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -205,11 +206,29 @@ func (a *Auth) isOAuthASPath(path string) bool {
 
 // handleUnauthenticated は未認証リクエストに対して
 // ブラウザリクエストならリダイレクト、API リクエストなら 401 を返す。
+//
+// ブラウザリクエストの場合、`redirect_to` クエリ値として元 URL を `url.QueryEscape`
+// してから連結する（Phase D-1）。`PostLoginRedirectValidator` が設定済みなら
+// 連結前にチェックし、reject 時は 400 を返す。
 func (a *Auth) handleUnauthenticated(w http.ResponseWriter, r *http.Request) {
 	if isBrowserRequest(r) {
 		// ブラウザリクエスト: ログインページにリダイレクト
 		redirectTo := r.URL.RequestURI()
-		loginURL := a.config.PathPrefix + "/login?redirect_to=" + redirectTo
+
+		// Validator が設定済みなら検査（reject 時は 400、入力起因）
+		if v := a.config.PostLoginRedirectValidator; v != nil {
+			if vErr := callValidatorSafe(v, redirectTo, a.logger, "wrap_handle_unauthenticated"); vErr != nil {
+				a.logger.Warn("idproxy: post-login redirect rejected by validator",
+					"redirect_to", redirectTo,
+					"error", vErr,
+					"phase", "wrap_handle_unauthenticated",
+				)
+				http.Error(w, "invalid redirect_to", http.StatusBadRequest)
+				return
+			}
+		}
+
+		loginURL := a.config.PathPrefix + "/login?redirect_to=" + url.QueryEscape(redirectTo)
 		http.Redirect(w, r, loginURL, http.StatusFound)
 		return
 	}
@@ -235,4 +254,26 @@ func extractBearerToken(r *http.Request) string {
 func isBrowserRequest(r *http.Request) bool {
 	accept := r.Header.Get("Accept")
 	return strings.Contains(accept, "text/html")
+}
+
+// callValidatorSafe は PostLoginRedirectValidator を panic 安全に呼び出すヘルパー。
+// validator が nil の場合は呼び出し側で nil チェック済みである前提（このヘルパーには non-nil 渡し）。
+// panic 時は ErrUnsafePostLoginRedirect を wrap して返す。
+// `http.ErrAbortHandler` だけは再 panic（サーバ側のクライアント切断扱いと整合）。
+func callValidatorSafe(v func(string) error, redirectTo string, logger *slog.Logger, phase string) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			if rec == http.ErrAbortHandler {
+				panic(rec)
+			}
+			if logger != nil {
+				logger.Error("idproxy: panic in PostLoginRedirectValidator",
+					"recover", rec,
+					"phase", phase,
+				)
+			}
+			err = ErrUnsafePostLoginRedirect
+		}
+	}()
+	return v(redirectTo)
 }

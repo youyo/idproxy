@@ -2,8 +2,10 @@ package idproxy
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -617,6 +619,79 @@ func TestWrap_OAuthASPaths_NonMatchingPaths(t *testing.T) {
 	// OAuth AS パスではないので通常の判定（Accept: application/json → 401）
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for non-matching path, got %d", rec.Code)
+	}
+}
+
+// --- M23 Phase D: redirect_to URL escape + Validator 回帰テスト ---
+
+// T28: Auth.Wrap がブラウザ未認証時に発行する Location 内の redirect_to が URL escape されている。
+func TestWrap_BrowserUnauthenticated_RedirectToIsURLEscaped(t *testing.T) {
+	a, _ := setupAuth(t)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next should not be called")
+	})
+
+	// `&also=2` を含む RawQuery にする
+	req := httptest.NewRequest(http.MethodGet, "/p?evil=1&also=2", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	// `redirect_to=` の値部分が URL escape されており、生の `&also=2` が混入しないこと
+	if !contains(loc, "redirect_to=") {
+		t.Fatalf("Location should contain redirect_to=, got %q", loc)
+	}
+	// 連結後の loginURL をパースして redirect_to クエリ値が "/p?evil=1&also=2" にデコードされること
+	u, perr := url.Parse(loc)
+	if perr != nil {
+		t.Fatalf("parse Location: %v", perr)
+	}
+	gotRT := u.Query().Get("redirect_to")
+	if gotRT != "/p?evil=1&also=2" {
+		t.Errorf("redirect_to (decoded) = %q, want %q", gotRT, "/p?evil=1&also=2")
+	}
+}
+
+// T29: Validator が常に reject を返す設定の場合は 400。
+// Phase D-1 の挙動として、handleUnauthenticated が Validator を通すこと自体を確認する。
+func TestWrap_BrowserUnauthenticated_ValidatorReject_400(t *testing.T) {
+	a, _ := setupAuth(t, func(c *Config) {
+		c.PostLoginRedirectValidator = func(string) error { return errors.New("nope") }
+	})
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next should not be called")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/p", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 when validator rejects, got %d (loc=%q)", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+// T30: Phase D で auth.go を弄ったが、API リクエスト経路の 401 は維持されている。
+func TestWrap_APIUnauthenticated_Returns401_Unchanged(t *testing.T) {
+	a, _ := setupAuth(t)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next should not be called")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for API request, got %d", rec.Code)
 	}
 }
 
