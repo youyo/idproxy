@@ -87,12 +87,21 @@ func main() {
 		// 認証完了時のフック。
 		//   - 外部 OAuth 未接続なら /oauth/external/start にリダイレクト
 		//   - 接続済みなら元のリダイレクト先（state.RedirectURI もしくは DefaultPostLoginPath）に任せる
+		// 認証完了時のフック。
+		// 注意: このフックは「OIDC 認証完了直後の初回リダイレクト先変更」にのみ使用します。
+		// フック実行時点でセッション Cookie は既に発行済みのため、/protected などの保護
+		// エンドポイントへのアクセス制御には引き続き per-request チェック（下記 /protected
+		// ハンドラを参照）が必要です。OnAuthenticated を per-request middleware の代替として
+		// 使うことはできません。
 		OnAuthenticated: func(w http.ResponseWriter, r *http.Request, user *idproxy.User) (redirectTo string, handled bool) {
 			if !tokenStore.HasToken(user.Email) {
 				log.Printf("OnAuthenticated: user %q has no external token; redirecting to /oauth/external/start",
 					user.Email)
 				// `handled=false, redirectTo!=""` → BrowserAuth が Validator を通してから 302
-				return "/oauth/external/start?return_to=" + r.URL.Query().Get("redirect_to"), false
+				// 注意: /callback リクエストには redirect_to クエリは含まれないため、
+				// ここでは固定パスを返す。元の destination が必要な場合は Store を
+				// 経由して stateData.RedirectURI を引き継ぐ設計が必要（docs/cascade-oauth-pattern.md 参照）。
+				return "/oauth/external/start", false
 			}
 			log.Printf("OnAuthenticated: user %q has external token; using default redirect", user.Email)
 			return "", false
@@ -111,10 +120,19 @@ func main() {
 	mux := http.NewServeMux()
 
 	// 認証必須エンドポイント（idproxy.Auth.Wrap でラップ）
+	// idproxy セッション（OIDC 認証済み）に加え、外部 OAuth トークンも必須とする。
+	// OnAuthenticated フックはリダイレクト先変更のみ担当し、ここでのアクセス制御は
+	// 代替しない。セッション有効 + 外部トークンなしでも /protected に到達できるため、
+	// per-request チェックが必要。
 	mux.HandleFunc("/protected", func(w http.ResponseWriter, r *http.Request) {
 		user := idproxy.UserFromContext(r.Context())
 		if user == nil {
 			http.Error(w, "no user in context", http.StatusInternalServerError)
+			return
+		}
+		// 外部 OAuth トークン必須チェック（per-request）
+		if !tokenStore.HasToken(user.Email) {
+			http.Redirect(w, r, "/oauth/external/start", http.StatusFound)
 			return
 		}
 		_, _ = w.Write([]byte("welcome, " + user.Email))
@@ -135,6 +153,13 @@ func main() {
 		returnTo := r.URL.Query().Get("return_to")
 		if returnTo == "" {
 			returnTo = "/protected"
+		}
+		// return_to を Validator で検証してからリダイレクト（オープンリダイレクト防止）
+		if validate := cfg.PostLoginRedirectValidator; validate != nil {
+			if err := validate(returnTo); err != nil {
+				http.Error(w, "invalid return_to", http.StatusBadRequest)
+				return
+			}
 		}
 		http.Redirect(w, r, returnTo, http.StatusFound)
 	})
