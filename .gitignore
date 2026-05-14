@@ -8,6 +8,8 @@ cmd/idproxy/idproxy
 /idproxy
 /basic
 /mcp-server
+/cascade-oauth
+/dynamodb-coexist
 
 # Test binary, built with `go test -c`
 *.test

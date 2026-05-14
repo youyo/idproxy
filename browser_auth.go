@@ -343,8 +343,6 @@ func (ba *BrowserAuth) CallbackHandler() http.Handler {
 			return
 		}
 
-		_ = sess // session 自体は Cookie 経由で渡るので明示参照は不要
-
 		// OnAuthenticated フックを呼び出し、戻り値で post-login のリダイレクト挙動を決定する。
 		// 4 状態の解釈は Config.OnAuthenticated の godoc を参照。
 		if ba.onAuthenticated != nil {
