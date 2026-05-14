@@ -200,6 +200,26 @@
 - [x] `CHANGELOG.md` — Unreleased エントリ追加
 - 📄 詳細: plans/sqlite-dynamodb-lucky-gosling.md
 
+### M23: Issue #11 DX 改善（BrowserAuth ドキュメント + Store coexistence）
+Issue: https://github.com/youyo/idproxy/issues/11 / 対象バージョン: v0.5.0 / Status: ✅ 完了
+- [x] `config.go` — `DefaultPostLoginPath` / `OnAuthenticated` / `PostLoginRedirectValidator` 追加、`StrictPostLoginRedirectValidator` helper と `(*Config).UseStrictPostLoginRedirectValidator()` setter を公開
+- [x] `browser_auth.go` — `LoginHandler` のデフォルトパス・Validator 適用、`CallbackHandler` の `OnAuthenticated` フック呼び出し（panic recover + Validator 二重適用）、`SelectionHandler` の `redirect_to` を `url.QueryEscape` + Validator 適用
+- [x] `auth.go` — `handleUnauthenticated` で `redirect_to` を `url.QueryEscape` + Validator 適用、reject 時 400（Phase D-1）
+- [x] `oauth_server.go` — `redirectToLogin` に Validator 適用（escape は既存通り、Phase D-3）
+- [x] `browser_auth_test.go` / `auth_test.go` / `config_test.go` / `oauth_server_test.go` — T1-T31 + S1-S3 のテスト追加
+- [x] `store/redis/store.go` — `Option` 型・`WithClientOwnership` 追加、`NewWithClient(client, keyPrefix, opts ...Option)` 末尾可変引数（後方互換）、`Close()` 挙動分岐
+- [x] `store/dynamodb.go` — godoc に「注入 client は Close で閉じない」を明文化（実装変更なし）
+- [x] `examples/cascade-oauth/` 新規（main.go + main_test.go + README.md の 3 ファイル）
+- [x] `examples/dynamodb-coexist/` 新規（main.go + main_test.go + table.json + README.md）
+- [x] `docs/store-coexistence.md` 新規
+- [x] `docs/cascade-oauth-pattern.md` 新規
+- [x] `README.md` / `README_ja.md` — Post-Login Redirect / Cascade OAuth / Client Ownership / Migration Guide 新セクション
+- [x] `doc.go` — パッケージドキュメント拡充
+- [x] `.github/workflows/ci.yml` — `go build ./examples/...` + `go test ./examples/...` ステップ追加
+- [x] `CHANGELOG.md` — Unreleased: feat/security/docs エントリ追加
+- スコープ外（M24 候補）: SQLite `NewWithDB(*sql.DB, ...Option)` の追加。PRAGMA 強制契約の設計を要する
+- 📄 詳細: plans/idproxy-m23-issue11-dx-improvements.md
+
 ## Blockers
 なし
 
