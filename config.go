@@ -2,13 +2,17 @@ package idproxy
 
 import (
 	"crypto"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Config は idproxy の設定を保持する。
@@ -64,6 +68,51 @@ type Config struct {
 	// デフォルト: "" （ルート直下）。
 	// 例: "/auth" → /auth/authorize, /auth/token 等
 	PathPrefix string
+
+	// DefaultPostLoginPath は認証完了後のデフォルトリダイレクト先。
+	// 空文字列なら "/" を使用（現状互換）。
+	// `LoginHandler` の `redirect_to` クエリが未指定の場合に使用される。
+	// 先頭が "/" で始まる相対パスである必要があり、"//" で始まる
+	// protocol-relative URL は禁止（Validate でエラー）。
+	DefaultPostLoginPath string
+
+	// OnAuthenticated は認証完了時（CallbackHandler 内の session 発行直後）に
+	// 呼ばれるフック。
+	//
+	// 戻り値の解釈（4 状態）:
+	//   - handled=true, redirectTo=""    : フック側で ResponseWriter に応答済み。
+	//                                       BrowserAuth はリダイレクトしない。
+	//   - handled=true, redirectTo!=""   : フック側で応答済みと解釈し、redirectTo
+	//                                       は無視される（godoc 上の契約）。
+	//   - handled=false, redirectTo!=""  : PostLoginRedirectValidator を通してから
+	//                                       redirectTo へ 302。Validator が nil なら
+	//                                       直接 302、Validator がエラーを返すなら 500。
+	//   - handled=false, redirectTo==""  : 現状通り state に保存された RedirectURI へ 302。
+	//
+	// 呼び出し前後で `r.Context().Err() != nil` を検出した場合、BrowserAuth は
+	// それ以降 ResponseWriter に何も書かずハンドラーを終了する（client cancellation 伝播）。
+	//
+	// フックは認証完了に同期で呼ばれるため、長い処理は呼び出し側で goroutine 化すること。
+	// フック内で panic が発生した場合、BrowserAuth は recover して 500 を返す
+	// （`http.ErrAbortHandler` だけは再 panic）。
+	OnAuthenticated func(w http.ResponseWriter, r *http.Request, user *User) (redirectTo string, handled bool)
+
+	// PostLoginRedirectValidator は post-login redirect 先の安全性を検証する関数。
+	//
+	// 適用される箇所:
+	//   - `LoginHandler` の `redirect_to` クエリ
+	//   - `SelectionHandler` の `redirect_to` クエリ
+	//   - `Auth.Wrap` の未認証ブラウザリクエストで生成される `redirect_to`
+	//   - `OAuthServer.redirectToLogin` の `redirect_to`
+	//   - `OnAuthenticated` フック戻り値の `redirectTo`
+	//
+	// nil なら検査しない（v0.4.2 までの動作互換、純粋 API 追加）。
+	// `StrictPostLoginRedirectValidator(cfg.ExternalURL)` または
+	// `(*Config).UseStrictPostLoginRedirectValidator()` を呼ぶことで opt-in できる。
+	//
+	// Validator が non-nil でエラーを返した場合、入力起因のため 400 を返す（500 ではない）。
+	// Validator 内 panic は BrowserAuth 側で recover して 500 を返す。
+	PostLoginRedirectValidator func(redirectTo string) error
 }
 
 // OIDCProvider は1つの OIDC プロバイダーの設定を保持する。
@@ -185,10 +234,116 @@ func (c *Config) Validate() error {
 		errs = append(errs, "oauth.signing_key is required when oauth is configured")
 	}
 
+	// DefaultPostLoginPath（空文字列は許容、設定値は先頭スラッシュ必須・"//" 禁止）
+	if c.DefaultPostLoginPath != "" {
+		if !strings.HasPrefix(c.DefaultPostLoginPath, "/") {
+			errs = append(errs, "default_post_login_path must start with '/'")
+		} else if strings.HasPrefix(c.DefaultPostLoginPath, "//") {
+			errs = append(errs, "default_post_login_path must not start with '//' (protocol-relative URL not allowed)")
+		}
+		// PostLoginRedirectValidator が設定されているなら、DefaultPostLoginPath にも同じ Validator を適用する
+		if c.PostLoginRedirectValidator != nil {
+			if vErr := c.PostLoginRedirectValidator(c.DefaultPostLoginPath); vErr != nil {
+				errs = append(errs, fmt.Sprintf("default_post_login_path rejected by validator: %v", vErr))
+			}
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// ErrUnsafePostLoginRedirect は PostLoginRedirectValidator がリダイレクト先を
+// 拒否した時に返される sentinel エラー。利用側で errors.Is で判定できる。
+var ErrUnsafePostLoginRedirect = errors.New("idproxy: unsafe post-login redirect")
+
+// StrictPostLoginRedirectValidator は post-login redirect 先を厳格に検査する
+// `func(string) error` を返す。利用側が opt-in で安全側に切り替えるための helper。
+//
+// externalURL は Config.ExternalURL と同一の値を渡す（同一 origin の絶対 URL
+// 許可判定に使用する）。空文字列を渡した場合は「相対パスのみ許可」モードになる。
+//
+// 許可条件（多段検査、順番に評価する）:
+//  1. `strings.TrimSpace` 後の入力に `unicode.IsControl` を含むなら reject
+//  2. backslash や HTML 構造文字 `\<>"'` を含むなら reject
+//  3. NFKC 正規化後と元の入力で差分があるなら reject（同形異字攻撃排除）
+//  4. `url.Parse` で scheme/host を取得し、以下のいずれかに合致するなら通過:
+//     - 相対パス: scheme="" かつ host="" かつ "/" で始まり "//" で始まらない
+//     - 同一 origin の絶対 URL: scheme="https" かつ host==externalURL の host
+//  5. それ以外は reject（`javascript:`/`data:`/`vbscript:`/`file:`/protocol-relative も拒否）
+//
+// 拒否時は `ErrUnsafePostLoginRedirect` を wrap した error を返す。
+func StrictPostLoginRedirectValidator(externalURL string) func(string) error {
+	var externalHost string
+	if externalURL != "" {
+		if u, err := url.Parse(externalURL); err == nil {
+			externalHost = u.Host
+		}
+	}
+
+	return func(redirectTo string) error {
+		// 空文字列は呼び出し側がデフォルトを当てるため許容（DefaultPostLoginPath 空 + クエリ空時の経路）。
+		if redirectTo == "" {
+			return nil
+		}
+
+		trimmed := strings.TrimSpace(redirectTo)
+		if trimmed != redirectTo {
+			return fmt.Errorf("%w: leading/trailing whitespace", ErrUnsafePostLoginRedirect)
+		}
+
+		// 制御文字・format 文字（ゼロ幅スペース U+200B 等の Cf カテゴリも含む）を排除
+		for _, r := range trimmed {
+			if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+				return fmt.Errorf("%w: contains control or format character", ErrUnsafePostLoginRedirect)
+			}
+		}
+
+		// 構造文字（backslash で `\evil.com`、HTML/quote 系も）排除
+		if strings.ContainsAny(trimmed, "\\<>\"'") {
+			return fmt.Errorf("%w: contains unsafe character", ErrUnsafePostLoginRedirect)
+		}
+
+		// NFKC 正規化前後で差分があれば、同形異字攻撃を疑い reject
+		if norm.NFKC.String(trimmed) != trimmed {
+			return fmt.Errorf("%w: not NFKC-normalized", ErrUnsafePostLoginRedirect)
+		}
+
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return fmt.Errorf("%w: parse error: %v", ErrUnsafePostLoginRedirect, err)
+		}
+
+		// 相対パス（scheme + host とも空）の場合は "/" 始まりかつ "//" 始まりでないこと
+		if u.Scheme == "" && u.Host == "" {
+			if !strings.HasPrefix(trimmed, "/") {
+				return fmt.Errorf("%w: relative path must start with '/'", ErrUnsafePostLoginRedirect)
+			}
+			if strings.HasPrefix(trimmed, "//") {
+				return fmt.Errorf("%w: protocol-relative URL not allowed", ErrUnsafePostLoginRedirect)
+			}
+			return nil
+		}
+
+		// 絶対 URL：https かつ ExternalURL と同一 host のみ許可
+		if u.Scheme == "https" && externalHost != "" && u.Host == externalHost {
+			return nil
+		}
+
+		return fmt.Errorf("%w: scheme=%q host=%q not allowed", ErrUnsafePostLoginRedirect, u.Scheme, u.Host)
+	}
+}
+
+// UseStrictPostLoginRedirectValidator は Config.PostLoginRedirectValidator に
+// `StrictPostLoginRedirectValidator(c.ExternalURL)` を設定するヘルパー。
+//
+// 呼び出すと Strict Validator が opt-in され、相対パスおよび同一 origin の
+// 絶対 URL のみが許可される。`Config.ExternalURL` の渡し忘れを防ぐため、
+// 利用側はこのメソッド経由でセットすることを推奨する。
+func (c *Config) UseStrictPostLoginRedirectValidator() {
+	c.PostLoginRedirectValidator = StrictPostLoginRedirectValidator(c.ExternalURL)
 }
 
 // isLocalhostURL は URL が http://localhost へのアクセスかどうかを判定する。
