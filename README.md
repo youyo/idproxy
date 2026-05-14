@@ -155,6 +155,101 @@ func main() {
 }
 ```
 
+### Post-Login Redirect Behavior
+
+After authentication, idproxy redirects users back to the URL they originally
+requested. The destination is chosen in this order:
+
+1. The `redirect_to` query parameter passed to `/login`, if supplied.
+2. `Config.DefaultPostLoginPath`, if set (e.g. `"/dashboard"`).
+3. `"/"` (legacy default).
+
+If your application doesn't mount a handler at `"/"`, set
+`DefaultPostLoginPath` to point at a real route, or use the
+`OnAuthenticated` hook (below). Without one of these, a fresh login lands
+on a 404. (See [kintone#5](https://github.com/youyo/kintone/issues/5) for
+the bug this section prevents.)
+
+#### `Config.OnAuthenticated` hook
+
+`OnAuthenticated` runs once, right after the session cookie is issued.
+Return values control the next step:
+
+| `handled` | `redirectTo` | Behavior                                                    |
+| --------- | ------------ | ----------------------------------------------------------- |
+| `true`    | `""`         | Hook already wrote the response; idproxy does nothing.      |
+| `true`    | non-empty    | `redirectTo` is **ignored** (hook is considered authoritative). |
+| `false`   | non-empty    | idproxy validates `redirectTo` and redirects (302).         |
+| `false`   | `""`         | Fallback to the original `redirect_to` or `DefaultPostLoginPath`. |
+
+```go
+cfg := idproxy.Config{
+    // ...
+    DefaultPostLoginPath: "/dashboard",
+    OnAuthenticated: func(w http.ResponseWriter, r *http.Request, user *idproxy.User) (string, bool) {
+        log.Printf("user %q logged in", user.Email)
+        return "", false // use the default redirect chain
+    },
+}
+```
+
+Panic inside the hook is recovered and surfaces as `500`. If you return
+`handled=false` but already wrote to the `ResponseWriter`, idproxy logs a
+warning and skips its own redirect.
+
+#### Securing `redirect_to` with `StrictPostLoginRedirectValidator`
+
+By default idproxy accepts any `redirect_to` value (legacy behavior). To
+turn on the strict open-redirect validator, opt in:
+
+```go
+cfg.UseStrictPostLoginRedirectValidator()
+```
+
+This rejects `javascript:`, `data:`, protocol-relative (`//evil`),
+non-NFKC, backslash, and control-character inputs. Allowed:
+
+- Relative paths starting with `/` (but not `//`).
+- HTTPS URLs whose host equals `Config.ExternalURL`'s host
+  (same-origin absolute redirect).
+
+The validator runs at every redirect entry point:
+`LoginHandler`, `SelectionHandler`, `Auth.Wrap`'s unauthenticated browser
+path, `OAuthServer.redirectToLogin`, **and** the `redirectTo` returned by
+the `OnAuthenticated` hook. Rejections produce `400` (for user input) or
+`500` (for hook output).
+
+#### Cascade OAuth pattern
+
+The `OnAuthenticated` hook is how idproxy applications layer a **second
+OAuth flow** (Slack / Backlog / kintone) on top of OIDC login. See
+[`examples/cascade-oauth`](examples/cascade-oauth) for a minimal
+walkthrough and [`docs/cascade-oauth-pattern.md`](docs/cascade-oauth-pattern.md)
+for state management, token persistence, and failure-mode discussion.
+
+#### Migration: from middleware pattern to `OnAuthenticated`
+
+Many apps historically wrap their own middleware around `Auth.Wrap` to
+enforce cascade OAuth on every request. The hook lets you do the same in
+one place, at the right time:
+
+```go
+// Before — runs on every request, easy to miss adding around new mounts.
+http.ListenAndServe(":8080", MyOAuthMiddleware(tokenStore, auth.Wrap(mux)))
+
+// After — runs once, right after login, registered with Config.
+cfg.OnAuthenticated = func(w http.ResponseWriter, r *http.Request, user *idproxy.User) (string, bool) {
+    if !tokenStore.HasToken(user.Email) {
+        return "/oauth/external/start?return_to=" + r.URL.Query().Get("redirect_to"), false
+    }
+    return "", false
+}
+http.ListenAndServe(":8080", auth.Wrap(mux))
+```
+
+Real-world adoption:
+[logvalet](https://github.com/youyo/logvalet) — Backlog MCP server.
+
 ### MCP Server Protection (OAuth 2.1 AS)
 
 Setting `Config.OAuth` enables automatic OAuthServer initialization in `Auth.New()`.
@@ -268,6 +363,22 @@ idproxy persists sessions, authorization codes, access/refresh tokens and dynami
 
 When using the `idproxy` standalone binary, select a backend via the `STORE_BACKEND` environment variable. See the binary's `--help` or the [cmd/idproxy](cmd/idproxy) sources for required env vars per backend.
 
+### Client / DB ownership (cheat sheet)
+
+When you inject your own client / db into a Store via `*WithClient` /
+`*WithDB`, ownership at `Close()` differs:
+
+| Backend  | Default                            | How to opt out                                                |
+| -------- | ---------------------------------- | ------------------------------------------------------------- |
+| DynamoDB | **never** closes the injected client (AWS SDK v2 convention) | n/a                                                            |
+| Redis    | closes (`client.Close()`)          | `redisstore.NewWithClient(client, prefix, redisstore.WithClientOwnership(false))` |
+| SQLite   | closes (`db.Close()`)              | not yet exposed; `NewWithDB` is on the roadmap                 |
+
+This means it is always safe to share a single `*dynamodb.Client` between
+idproxy and your application code. For Redis, opt out of ownership if you
+want to keep using the client after idproxy is shut down. Full discussion
+in [`docs/store-coexistence.md`](docs/store-coexistence.md).
+
 ### Selecting from the binary
 
 ```sh
@@ -339,6 +450,15 @@ aws dynamodb update-time-to-live \
 ```
 
 > **Security**: The `data` attribute contains sensitive information (session data, access tokens). Enable [DynamoDB server-side encryption with AWS KMS (SSE-KMS)](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/EncryptionAtRest.html) for production use.
+
+### Coexistence with user-owned tables / GSIs
+
+idproxy is designed to share a DynamoDB table with your application data.
+Reserved PK prefixes (lowercase): `session:`, `authcode:`, `accesstoken:`,
+`client:`, `refreshtoken:`, `familyrevoked:`. idproxy never queries a GSI,
+so you can add your own freely. See [`examples/dynamodb-coexist`](examples/dynamodb-coexist)
+for a runnable example and [`docs/store-coexistence.md`](docs/store-coexistence.md)
+for the full guide (TTL sharing, hot partitions, attribute-name conflicts).
 
 > **Note**: `Cleanup()` is a no-op — expired items are removed automatically by DynamoDB TTL. DynamoDB TTL may have up to 48 hours of lag; `DynamoDBStore` compensates by checking the `ttl` attribute on every `Get` and returning `nil` for expired items.
 
