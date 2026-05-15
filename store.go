@@ -148,6 +148,12 @@ type RefreshTokenData struct {
 	// Subject はユーザーの OIDC sub クレーム。
 	Subject string
 
+	// OIDCIssuer は元の OIDC プロバイダの issuer URL。
+	// Bearer アクセストークンの User.Issuer を復元するために使用する。
+	// セッション経由の User.Issuer（OIDC issuer）と Bearer JWT の iss（ExternalURL）が
+	// 異なるため、principal_id の一貫性を保つために明示的に保持する。
+	OIDCIssuer string
+
 	// Email はユーザーのメールアドレス（新 access_token 再発行用）。
 	Email string
 
