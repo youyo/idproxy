@@ -95,14 +95,21 @@ func (v *BearerValidator) Validate(ctx context.Context, tokenStr string) (*User,
 	}
 
 	// 5. User を構築
+	// oidc_issuer クレームが存在する場合は OIDC プロバイダの issuer を使う。
+	// これにより Bearer JWT 経由と セッション経由で principal_id が一致する。
 	sub, _ := claims["sub"].(string)
 	name, _ := claims["name"].(string)
+	oidcIssuer, _ := claims["oidc_issuer"].(string)
+	if oidcIssuer == "" {
+		// 旧トークン（oidc_issuer なし）との後方互換: ExternalURL を issuer として使う。
+		oidcIssuer = v.issuer
+	}
 
 	user := &User{
 		Email:   email,
 		Name:    name,
 		Subject: sub,
-		Issuer:  v.issuer,
+		Issuer:  oidcIssuer,
 	}
 
 	return user, nil

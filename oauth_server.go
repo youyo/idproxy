@@ -545,11 +545,12 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// ユーザー情報を再構築
+		// ユーザー情報を再構築（OIDCIssuer を引き継いで principal_id を一致させる）
 		user := &User{
 			Email:   data.Email,
 			Name:    data.Name,
 			Subject: data.Subject,
+			Issuer:  data.OIDCIssuer,
 		}
 
 		// rotation 成功ログ（replay 検知ログと対称）
@@ -593,13 +594,14 @@ func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request,
 	jti := hex.EncodeToString(jtiBytes)
 
 	claims := jwt.MapClaims{
-		"jti":   jti,
-		"iss":   s.config.ExternalURL,
-		"aud":   s.config.ExternalURL,
-		"sub":   sub,
-		"email": email,
-		"exp":   jwt.NewNumericDate(expiresAt),
-		"iat":   jwt.NewNumericDate(now),
+		"jti":         jti,
+		"iss":         s.config.ExternalURL,
+		"aud":         s.config.ExternalURL,
+		"sub":         sub,
+		"email":       email,
+		"oidc_issuer": user.Issuer,
+		"exp":         jwt.NewNumericDate(expiresAt),
+		"iat":         jwt.NewNumericDate(now),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
@@ -636,16 +638,17 @@ func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request,
 	refreshTokenID := base64.RawURLEncoding.EncodeToString(rtBytes)
 
 	rtData := &RefreshTokenData{
-		ID:        refreshTokenID,
-		FamilyID:  familyID,
-		ClientID:  clientID,
-		Subject:   sub,
-		Email:     email,
-		Name:      name,
-		Scopes:    scopes,
-		IssuedAt:  now,
-		ExpiresAt: now.Add(s.refreshTokenTTL),
-		Used:      false,
+		ID:         refreshTokenID,
+		FamilyID:   familyID,
+		ClientID:   clientID,
+		Subject:    sub,
+		OIDCIssuer: user.Issuer,
+		Email:      email,
+		Name:       name,
+		Scopes:     scopes,
+		IssuedAt:   now,
+		ExpiresAt:  now.Add(s.refreshTokenTTL),
+		Used:       false,
 	}
 	if err := s.store.SetRefreshToken(ctx, refreshTokenID, rtData, s.refreshTokenTTL); err != nil {
 		s.tokenError(w, "server_error", "failed to store refresh token", http.StatusInternalServerError)
