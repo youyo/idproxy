@@ -173,7 +173,14 @@ func (a *Auth) Wrap(next http.Handler) http.Handler {
 			}
 
 			// 認証済み: User をコンテキストに注入して next に委譲
-			ctx := newContextWithUser(r.Context(), sess.User)
+			// StoreIDToken が有効な場合、セッションに保存された IDToken を User に付与する。
+			user := sess.User
+			if a.config.StoreIDToken && user != nil && sess.IDToken != "" {
+				userWithToken := *user
+				userWithToken.IDToken = sess.IDToken
+				user = &userWithToken
+			}
+			ctx := newContextWithUser(r.Context(), user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}

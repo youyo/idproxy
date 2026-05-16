@@ -64,3 +64,31 @@ func TestUserFromContext_WithoutUser(t *testing.T) {
 		t.Errorf("UserFromContext returned %v, want nil", got)
 	}
 }
+
+func TestUser_IDToken_DefaultEmpty(t *testing.T) {
+	// IDToken フィールドを省略した場合、空文字列（後方互換）。
+	u := User{
+		Email:   "user@example.com",
+		Subject: "sub-123",
+	}
+	if u.IDToken != "" {
+		t.Errorf("IDToken: got %q, want empty (backward compat)", u.IDToken)
+	}
+}
+
+func TestUser_IDToken_SetAndGet(t *testing.T) {
+	rawToken := "eyJhbGciOiJSUzI1NiJ9.example"
+	u := User{
+		Email:   "user@example.com",
+		Subject: "sub-123",
+		IDToken: rawToken,
+	}
+	ctx := newContextWithUser(context.Background(), &u)
+	got := UserFromContext(ctx)
+	if got == nil {
+		t.Fatal("UserFromContext returned nil")
+	}
+	if got.IDToken != rawToken {
+		t.Errorf("IDToken: got %q, want %q", got.IDToken, rawToken)
+	}
+}

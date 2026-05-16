@@ -24,6 +24,11 @@ type User struct {
 
 	// Claims は ID Token の全クレーム。
 	Claims map[string]interface{}
+
+	// IDToken は IdP が発行した生の ID Token 文字列。
+	// Config.StoreIDToken = true の場合のみセットされる。
+	// AWS STS AssumeRoleWithWebIdentity 等、IdP トークンが必要な用途に使用する。
+	IDToken string
 }
 
 // UserFromContext はリクエストコンテキストから認証済みユーザー情報を取得する。

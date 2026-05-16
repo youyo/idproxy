@@ -113,6 +113,22 @@ type Config struct {
 	// Validator が non-nil でエラーを返した場合、入力起因のため 400 を返す（500 ではない）。
 	// Validator 内 panic は BrowserAuth 側で recover して 500 を返す。
 	PostLoginRedirectValidator func(redirectTo string) error
+
+	// StoreIDToken は認証完了時に IdP から受け取った生の ID Token を
+	// User.IDToken にセットするかどうかを指定する。
+	//
+	// デフォルト: false（既存動作を維持）。
+	//
+	// true にすると、OIDC コールバック（ブラウザ認証フロー）経由で
+	// ログインしたユーザーの User.IDToken に IdP の ID Token 文字列がセットされる。
+	// セッション継続中は UserFromContext(ctx).IDToken で取得可能。
+	//
+	// 主な用途: AWS STS AssumeRoleWithWebIdentity など、
+	// IdP が発行したトークンをそのままダウンストリームサービスに渡す必要がある場合。
+	//
+	// 注意: ID Token はセッションストアに保存される。
+	// ストアの暗号化が有効であることを確認すること。
+	StoreIDToken bool
 }
 
 // OIDCProvider は1つの OIDC プロバイダーの設定を保持する。
