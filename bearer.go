@@ -110,6 +110,7 @@ func (v *BearerValidator) Validate(ctx context.Context, tokenStr string) (*User,
 		Name:    name,
 		Subject: sub,
 		Issuer:  oidcIssuer,
+		IDToken: tokenData.IDToken,
 	}
 
 	return user, nil
