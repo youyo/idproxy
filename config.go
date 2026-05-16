@@ -126,8 +126,12 @@ type Config struct {
 	// 主な用途: AWS STS AssumeRoleWithWebIdentity など、
 	// IdP が発行したトークンをそのままダウンストリームサービスに渡す必要がある場合。
 	//
-	// 注意: ID Token はセッションストアに保存される。
-	// ストアの暗号化が有効であることを確認すること。
+	// 注意:
+	//   - ID Token はセッションストアに保存される。ストアの暗号化が有効であることを確認すること。
+	//   - ID Token の有効期限（exp クレーム）はセッション有効期限より短い場合がある（多くの
+	//     IdP では約 1 時間）。AWS STS AssumeRoleWithWebIdentity 等でこの Token を使用する
+	//     場合、呼び出し側で exp クレームを確認してから使用すること。期限切れの Token は
+	//     STS に拒否されるが、UserFromContext(ctx).IDToken は空でない文字列を返し続ける。
 	StoreIDToken bool
 }
 

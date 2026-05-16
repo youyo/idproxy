@@ -9,6 +9,10 @@ type contextKey struct{}
 var userContextKey = contextKey{}
 
 // User は認証済みユーザーの情報を保持する。
+//
+// 注意（移行): IDToken フィールドの追加により、unkeyed struct literal
+//（例: idproxy.User{"email", "name", ...}）を使用しているコードはコンパイルエラーになる。
+// keyed literal（例: idproxy.User{Email: "...", Name: "..."}）に移行すること。
 type User struct {
 	// Email はユーザーのメールアドレス。
 	Email string
