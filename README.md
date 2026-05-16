@@ -103,7 +103,7 @@ services:
 When registering idproxy as a client in your OIDC provider, set the redirect URI to:
 
 ```
-{EXTERNAL_URL}/auth/callback
+{EXTERNAL_URL}/callback
 ```
 
 ### Microsoft Entra ID
@@ -146,8 +146,10 @@ Then click **Grant admin consent** to avoid per-user consent prompts.
 **Authentication** → **Add a platform** → **Web** → set:
 
 ```
-{EXTERNAL_URL}/auth/callback
+{EXTERNAL_URL}/callback
 ```
+
+> If `PATH_PREFIX` is set (e.g. `PATH_PREFIX=/auth`), append the prefix: `{EXTERNAL_URL}/auth/callback`.
 
 ### Amazon Cognito
 
