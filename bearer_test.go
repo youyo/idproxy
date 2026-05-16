@@ -375,3 +375,72 @@ func TestBearerValidator_Validate_MalformedToken(t *testing.T) {
 		t.Fatal("Validate() should return error for malformed token")
 	}
 }
+
+// TestBearerValidator_Validate_IDToken_Propagated は StoreIDToken=true 相当の
+// AccessTokenData.IDToken が bearer 検証後に User.IDToken に伝播することを検証する。
+func TestBearerValidator_Validate_IDToken_Propagated(t *testing.T) {
+	bv, st, idp := setupBearerValidator(t)
+	ctx := context.Background()
+
+	jti := "test-jti-idtoken"
+	email := "user@example.com"
+	sub := "sub-idtoken"
+	name := "Test User"
+	exp := time.Now().Add(time.Hour)
+	rawIDToken := "eyJhbGciOiJSUzI1NiJ9.fake-id-token"
+
+	_ = st.SetAccessToken(ctx, jti, &AccessTokenData{
+		JTI:       jti,
+		Subject:   sub,
+		Email:     email,
+		ClientID:  "test-client-id",
+		IssuedAt:  time.Now(),
+		ExpiresAt: exp,
+		Revoked:   false,
+		IDToken:   rawIDToken,
+	}, time.Hour)
+
+	token := issueTestToken(t, idp, "http://localhost:8080", "http://localhost:8080", sub, email, name, jti, exp)
+
+	user, err := bv.Validate(ctx, token)
+	if err != nil {
+		t.Fatalf("Validate() returned error: %v", err)
+	}
+	if user.IDToken != rawIDToken {
+		t.Errorf("IDToken: got %q, want %q", user.IDToken, rawIDToken)
+	}
+}
+
+// TestBearerValidator_Validate_IDToken_Empty は StoreIDToken=false（デフォルト）のとき
+// User.IDToken が空のままであることを検証する（後方互換）。
+func TestBearerValidator_Validate_IDToken_Empty(t *testing.T) {
+	bv, st, idp := setupBearerValidator(t)
+	ctx := context.Background()
+
+	jti := "test-jti-no-idtoken"
+	email := "user@example.com"
+	sub := "sub-no-idtoken"
+	name := "Test User"
+	exp := time.Now().Add(time.Hour)
+
+	_ = st.SetAccessToken(ctx, jti, &AccessTokenData{
+		JTI:       jti,
+		Subject:   sub,
+		Email:     email,
+		ClientID:  "test-client-id",
+		IssuedAt:  time.Now(),
+		ExpiresAt: exp,
+		Revoked:   false,
+		// IDToken は空（StoreIDToken=false）
+	}, time.Hour)
+
+	token := issueTestToken(t, idp, "http://localhost:8080", "http://localhost:8080", sub, email, name, jti, exp)
+
+	user, err := bv.Validate(ctx, token)
+	if err != nil {
+		t.Fatalf("Validate() returned error: %v", err)
+	}
+	if user.IDToken != "" {
+		t.Errorf("IDToken should be empty when StoreIDToken=false, got %q", user.IDToken)
+	}
+}

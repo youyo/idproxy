@@ -352,6 +352,11 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:           now.Add(ttl),
 		Used:                false,
 	}
+	// StoreIDToken が有効な場合、セッションの ID Token を認可コードに伝播する。
+	// authorization_code → access_token 経路で bearer 検証時に IDToken を復元するために使用。
+	if s.config.StoreIDToken && sess.IDToken != "" {
+		authCodeData.IDToken = sess.IDToken
+	}
 
 	if err := s.store.SetAuthCode(r.Context(), code, authCodeData, ttl); err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -496,7 +501,7 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// access_token + refresh_token を発行して応答（新 family）
-		s.issueTokenResponse(w, r, user, authCode.Scopes, clientID, "")
+		s.issueTokenResponse(w, r, user, authCode.Scopes, clientID, "", authCode.IDToken)
 
 	case "refresh_token":
 		refreshToken := r.PostFormValue("refresh_token")
@@ -561,7 +566,8 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		)
 
 		// 既存の familyID を引き継いで新 access_token + refresh_token を発行
-		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID)
+		// refresh_token フロー: IDToken はセッション外で取得不可のため空文字列を渡す
+		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID, "")
 
 	default:
 		s.tokenError(w, "unsupported_grant_type", "unsupported grant_type", http.StatusBadRequest)
@@ -571,7 +577,9 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 // issueTokenResponse は access_token + refresh_token を発行し応答を書く。
 // familyID が空文字列の場合は新規生成する（authorization_code 経路）。
 // 非空の場合は既存を引き継ぐ（refresh_token 経路）。
-func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request, user *User, scopes []string, clientID string, familyID string) {
+// idToken は authorization_code 経路で StoreIDToken=true のとき非空になる。
+// refresh_token 経路は "" を渡すこと。
+func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request, user *User, scopes []string, clientID string, familyID string, idToken string) {
 	ctx := r.Context()
 
 	// familyID が空なら新規生成
@@ -623,6 +631,7 @@ func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request,
 		IssuedAt:  now,
 		ExpiresAt: expiresAt,
 		Revoked:   false,
+		IDToken:   idToken,
 	}
 	if err := s.store.SetAccessToken(ctx, jti, tokenData, s.accessTokenTTL); err != nil {
 		s.tokenError(w, "server_error", "failed to store access token", http.StatusInternalServerError)

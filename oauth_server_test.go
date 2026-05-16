@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -2782,6 +2783,219 @@ func TestOAuthServer_RedirectToLogin_ValidatorReject_400(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 when validator rejects, got %d (loc=%q)", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+// --- StoreIDToken IDToken 伝播テスト ---
+
+// TestAuthorize_StoreIDToken_PropagatesToAuthCode は StoreIDToken=true のとき
+// セッションの IDToken が AuthCodeData.IDToken に伝播することを検証する。
+func TestAuthorize_StoreIDToken_PropagatesToAuthCode(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate ECDSA key: %v", err)
+	}
+	st := newTestMemoryStore()
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{Issuer: "https://accounts.google.com", ClientID: "cid", ClientSecret: "csec"},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		Store:        st,
+		StoreIDToken: true,
+		OAuth: &OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "test-oauth-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate(): %v", err)
+	}
+	sm, err := NewSessionManager(cfg)
+	if err != nil {
+		t.Fatalf("NewSessionManager: %v", err)
+	}
+	srv, err := NewOAuthServer(cfg, st, sm)
+	if err != nil {
+		t.Fatalf("NewOAuthServer: %v", err)
+	}
+
+	// rawIDToken を持つセッションを発行
+	rawIDToken := "eyJhbGciOiJSUzI1NiJ9.store-idtoken-test"
+	user := &User{Email: "user@example.com", Subject: "sub-store-idtoken", Issuer: "https://accounts.google.com"}
+	sess, err := sm.IssueSession(context.Background(), user, "https://accounts.google.com", rawIDToken)
+	if err != nil {
+		t.Fatalf("IssueSession: %v", err)
+	}
+	w0 := httptest.NewRecorder()
+	if err := sm.SetCookie(w0, sess.ID); err != nil {
+		t.Fatalf("SetCookie: %v", err)
+	}
+
+	q := validAuthorizeQuery()
+	req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+	for _, c := range w0.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d; body: %s", w.Code, w.Body.String())
+	}
+	loc, _ := url.Parse(w.Header().Get("Location"))
+	code := loc.Query().Get("code")
+	if code == "" {
+		t.Fatal("expected code in redirect")
+	}
+
+	authCode, err := st.GetAuthCode(context.Background(), code)
+	if err != nil {
+		t.Fatalf("GetAuthCode: %v", err)
+	}
+	if authCode.IDToken != rawIDToken {
+		t.Errorf("AuthCodeData.IDToken: got %q, want %q", authCode.IDToken, rawIDToken)
+	}
+}
+
+// TestAuthorize_StoreIDToken_False_NoIDTokenInAuthCode は StoreIDToken=false（デフォルト）のとき
+// AuthCodeData.IDToken が空のままであることを検証する（後方互換）。
+func TestAuthorize_StoreIDToken_False_NoIDTokenInAuthCode(t *testing.T) {
+	srv, sm, st := setupAuthorizeServer(t) // StoreIDToken=false（デフォルト）
+
+	cookies := issueTestSession(t, sm)
+	q := validAuthorizeQuery()
+	req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	loc, _ := url.Parse(w.Header().Get("Location"))
+	code := loc.Query().Get("code")
+
+	authCode, err := st.GetAuthCode(context.Background(), code)
+	if err != nil {
+		t.Fatalf("GetAuthCode: %v", err)
+	}
+	if authCode.IDToken != "" {
+		t.Errorf("IDToken should be empty when StoreIDToken=false, got %q", authCode.IDToken)
+	}
+}
+
+// TestToken_StoreIDToken_PropagatesToAccessToken は AuthCodeData.IDToken が
+// /token エンドポイント経由で AccessTokenData.IDToken に伝播することを検証する。
+func TestToken_StoreIDToken_PropagatesToAccessToken(t *testing.T) {
+	srv, st, _ := setupTokenServer(t)
+
+	rawIDToken := "eyJhbGciOiJSUzI1NiJ9.propagate-to-access-token"
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	code := "test-idtoken-code-propagate"
+	codeChallenge := S256Challenge(codeVerifier)
+
+	authCodeData := &AuthCodeData{
+		Code:                code,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User: &User{
+			Email:   "test@example.com",
+			Subject: "sub-idtoken",
+			Issuer:  "https://accounts.google.com",
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+		IDToken:   rawIDToken,
+	}
+	ctx := context.Background()
+	if err := st.SetAuthCode(ctx, code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	form := validTokenForm(code)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	// レスポンスから access_token の JTI を取得して AccessTokenData を検証
+	var resp struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	// JWT から JTI を取得（検証なし、テスト目的）
+	parts := strings.Split(resp.AccessToken, ".")
+	if len(parts) != 3 {
+		t.Fatal("invalid JWT format")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	var claims struct {
+		JTI string `json:"jti"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("claims unmarshal: %v", err)
+	}
+
+	tokenData, err := st.GetAccessToken(ctx, claims.JTI)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tokenData.IDToken != rawIDToken {
+		t.Errorf("AccessTokenData.IDToken: got %q, want %q", tokenData.IDToken, rawIDToken)
+	}
+}
+
+// TestToken_StoreIDToken_False_NoIDTokenInAccessToken は StoreIDToken=false（デフォルト）のとき
+// AccessTokenData.IDToken が空のままであることを検証する（後方互換）。
+func TestToken_StoreIDToken_False_NoIDTokenInAccessToken(t *testing.T) {
+	srv, st, code := setupTokenServer(t) // AuthCodeData.IDToken = ""
+
+	form := validTokenForm(code)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	parts := strings.Split(resp.AccessToken, ".")
+	payload, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	var claims struct {
+		JTI string `json:"jti"`
+	}
+	_ = json.Unmarshal(payload, &claims)
+
+	tokenData, err := st.GetAccessToken(context.Background(), claims.JTI)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tokenData.IDToken != "" {
+		t.Errorf("IDToken should be empty when StoreIDToken=false, got %q", tokenData.IDToken)
 	}
 }
 

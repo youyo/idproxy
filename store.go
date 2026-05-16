@@ -102,6 +102,11 @@ type AuthCodeData struct {
 	// Used は認可コードが既に使用済みかどうか。
 	// OAuth 2.1 では認可コードは1回のみ使用可能。
 	Used bool
+
+	// IDToken は Config.StoreIDToken = true のとき、IdP が発行した生の ID Token 文字列。
+	// authorization_code → access_token 発行時に AccessTokenData に伝播される。
+	// StoreIDToken = false（デフォルト）の場合は空文字列。
+	IDToken string
 }
 
 // AccessTokenData はアクセストークンのメタデータを保持する。
@@ -131,6 +136,11 @@ type AccessTokenData struct {
 
 	// Revoked はトークンがリボケーション済みかどうか。
 	Revoked bool
+
+	// IDToken は Config.StoreIDToken = true のとき、IdP が発行した生の ID Token 文字列。
+	// bearer.go での Validate 時に User.IDToken に伝播される。
+	// StoreIDToken = false（デフォルト）の場合は空文字列。
+	IDToken string
 }
 
 // RefreshTokenData は OAuth 2.1 リフレッシュトークンに紐づくデータを保持する。
