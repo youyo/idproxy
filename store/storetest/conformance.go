@@ -113,6 +113,7 @@ func NewRefreshTokenData(id string) *idproxy.RefreshTokenData {
 		Scopes:    []string{"openid", "profile"},
 		IssuedAt:  now,
 		ExpiresAt: now.Add(30 * 24 * time.Hour),
+		IDToken:   "eyJhbGciOiJSUzI1NiJ9.test-refresh-idtoken",
 	}
 }
 
@@ -430,6 +431,9 @@ func runRefreshTokenTests(t *testing.T, newStore Factory) {
 		}
 		if got == nil || got.FamilyID != data.FamilyID || got.Used {
 			t.Errorf("rt mismatch: %+v", got)
+		}
+		if got.IDToken != data.IDToken {
+			t.Errorf("IDToken: got %q, want %q", got.IDToken, data.IDToken)
 		}
 	})
 

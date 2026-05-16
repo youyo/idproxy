@@ -3021,10 +3021,39 @@ func jtiFromAccessToken(t *testing.T, accessToken string) string {
 	return claims.JTI
 }
 
-// setupTokenServerWithIDToken は AuthCodeData.IDToken を持つトークンサーバーを構築する。
+// setupTokenServerWithIDToken は StoreIDToken=true かつ AuthCodeData.IDToken を持つトークンサーバーを構築する。
 func setupTokenServerWithIDToken(t *testing.T, rawIDToken string) (*OAuthServer, *testMemoryStore, string) {
 	t.Helper()
-	srv, _, st := setupAuthorizeServer(t)
+
+	// StoreIDToken=true のサーバーを構築
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	st := newTestMemoryStore()
+	cfg := Config{
+		Providers:    []OIDCProvider{{Issuer: "https://accounts.google.com", ClientID: "cid", ClientSecret: "csec"}},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		Store:        st,
+		StoreIDToken: true,
+		OAuth: &OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "test-oauth-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Config.Validate: %v", err)
+	}
+	sm, err := NewSessionManager(cfg)
+	if err != nil {
+		t.Fatalf("NewSessionManager: %v", err)
+	}
+	srv, err := NewOAuthServer(cfg, st, sm)
+	if err != nil {
+		t.Fatalf("NewOAuthServer: %v", err)
+	}
 
 	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	code := "test-auth-code-with-idtoken"
@@ -3136,6 +3165,51 @@ func TestToken_RefreshGrant_IDToken_PropagatesToNewAccessToken(t *testing.T) {
 	}
 	if tokenData.IDToken != rawIDToken {
 		t.Errorf("AccessTokenData.IDToken after refresh: got %q, want %q", tokenData.IDToken, rawIDToken)
+	}
+}
+
+// TestToken_RefreshGrant_StoreIDTokenFalse_ClearsIDToken は StoreIDToken=false サーバーで
+// RefreshTokenData.IDToken に値があっても refresh 時に AccessTokenData.IDToken が空になることを検証する。
+// これは StoreIDToken=true → false への切り替え後、既存 family で IDToken が止まることを保証する。
+func TestToken_RefreshGrant_StoreIDTokenFalse_ClearsIDToken(t *testing.T) {
+	// StoreIDToken=false（デフォルト）のサーバー + ストアを取得
+	srv, st, oldRT, _ := setupTokenServerWithRefreshToken(t)
+	ctx := context.Background()
+
+	// 既存 refresh token に IDToken を後付けで注入（StoreIDToken=true 時代のデータを模倣）
+	rtData, err := st.GetRefreshToken(ctx, oldRT)
+	if err != nil || rtData == nil {
+		t.Fatalf("GetRefreshToken: %v", err)
+	}
+	rtData.IDToken = "eyJhbGciOiJSUzI1NiJ9.should-not-propagate"
+	rtData.Used = false // 再消費可能にリセット
+	_ = st.SetRefreshToken(ctx, oldRT, rtData, time.Hour)
+
+	// StoreIDToken=false サーバーで refresh_token グラント
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {oldRT},
+		"client_id":     {"test-oauth-client"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	newAT, _ := resp["access_token"].(string)
+	jti := jtiFromAccessToken(t, newAT)
+
+	tokenData, err := st.GetAccessToken(ctx, jti)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tokenData.IDToken != "" {
+		t.Errorf("StoreIDToken=false: IDToken should not propagate, got %q", tokenData.IDToken)
 	}
 }
 

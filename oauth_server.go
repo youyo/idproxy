@@ -566,8 +566,13 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		)
 
 		// 既存の familyID を引き継いで新 access_token + refresh_token を発行
-		// RefreshTokenData.IDToken を引き継ぐことで、refresh 後も federated モードが動作し続ける
-		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID, data.IDToken)
+		// StoreIDToken=true の場合のみ IDToken を引き継ぐ。
+		// false に切り替えた後は既存 family でも IDToken を伝播しない。
+		idTokenForRefresh := ""
+		if s.config.StoreIDToken {
+			idTokenForRefresh = data.IDToken
+		}
+		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID, idTokenForRefresh)
 
 	default:
 		s.tokenError(w, "unsupported_grant_type", "unsupported grant_type", http.StatusBadRequest)

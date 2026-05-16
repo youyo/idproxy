@@ -145,6 +145,10 @@ type AccessTokenData struct {
 
 // RefreshTokenData は OAuth 2.1 リフレッシュトークンに紐づくデータを保持する。
 // rotation + family tracking + replay detection に使用する。
+//
+// 注意（移行）: IDToken フィールドの追加により、unkeyed struct literal
+//（例: idproxy.RefreshTokenData{"id", "family", ...}）を使用しているコードはコンパイルエラーになる。
+// keyed literal（例: idproxy.RefreshTokenData{ID: "...", FamilyID: "..."}）に移行すること。
 type RefreshTokenData struct {
 	// ID は opaque リフレッシュトークン文字列（32バイト base64url）。
 	ID string
