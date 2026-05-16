@@ -2999,6 +2999,178 @@ func TestToken_StoreIDToken_False_NoIDTokenInAccessToken(t *testing.T) {
 	}
 }
 
+// --- RefreshTokenData IDToken 伝播テスト ---
+
+// jtiFromAccessToken は JWT access token から jti クレームを取り出すヘルパー。
+func jtiFromAccessToken(t *testing.T, accessToken string) string {
+	t.Helper()
+	parts := strings.Split(accessToken, ".")
+	if len(parts) != 3 {
+		t.Fatal("invalid JWT format")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	var claims struct {
+		JTI string `json:"jti"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("claims unmarshal: %v", err)
+	}
+	return claims.JTI
+}
+
+// setupTokenServerWithIDToken は AuthCodeData.IDToken を持つトークンサーバーを構築する。
+func setupTokenServerWithIDToken(t *testing.T, rawIDToken string) (*OAuthServer, *testMemoryStore, string) {
+	t.Helper()
+	srv, _, st := setupAuthorizeServer(t)
+
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	code := "test-auth-code-with-idtoken"
+
+	authCodeData := &AuthCodeData{
+		Code:                code,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       S256Challenge(codeVerifier),
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User: &User{
+			Email:   "test@example.com",
+			Subject: "sub-idtoken-rt",
+			Issuer:  "https://accounts.google.com",
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+		IDToken:   rawIDToken,
+	}
+	if err := st.SetAuthCode(context.Background(), code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+	return srv, st, code
+}
+
+// TestToken_AuthCode_IDToken_PropagatesToRefreshToken は authorization_code グラント時に
+// RefreshTokenData.IDToken が設定されることを検証する。
+func TestToken_AuthCode_IDToken_PropagatesToRefreshToken(t *testing.T) {
+	rawIDToken := "eyJhbGciOiJSUzI1NiJ9.idtoken-for-refresh"
+	srv, st, code := setupTokenServerWithIDToken(t, rawIDToken)
+
+	form := validTokenForm(code)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	rt, _ := resp["refresh_token"].(string)
+	if rt == "" {
+		t.Fatal("expected refresh_token in response")
+	}
+
+	rtData, err := st.GetRefreshToken(context.Background(), rt)
+	if err != nil {
+		t.Fatalf("GetRefreshToken: %v", err)
+	}
+	if rtData.IDToken != rawIDToken {
+		t.Errorf("RefreshTokenData.IDToken: got %q, want %q", rtData.IDToken, rawIDToken)
+	}
+}
+
+// TestToken_RefreshGrant_IDToken_PropagatesToNewAccessToken は refresh_token グラント時に
+// RefreshTokenData.IDToken が新しい AccessTokenData.IDToken に引き継がれることを検証する。
+func TestToken_RefreshGrant_IDToken_PropagatesToNewAccessToken(t *testing.T) {
+	rawIDToken := "eyJhbGciOiJSUzI1NiJ9.idtoken-for-refresh-chain"
+	srv, st, code := setupTokenServerWithIDToken(t, rawIDToken)
+	ctx := context.Background()
+
+	// Step1: authorization_code → access_token + refresh_token
+	form := validTokenForm(code)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorization_code exchange: expected 200, got %d", w.Code)
+	}
+	var resp1 map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp1)
+	rt, _ := resp1["refresh_token"].(string)
+	if rt == "" {
+		t.Fatal("no refresh_token in authorization_code response")
+	}
+
+	// Step2: refresh_token → 新 access_token
+	form2 := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {rt},
+		"client_id":     {"test-oauth-client"},
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("refresh_token grant: expected 200, got %d; body: %s", w2.Code, w2.Body.String())
+	}
+	var resp2 map[string]any
+	_ = json.Unmarshal(w2.Body.Bytes(), &resp2)
+	newAT, _ := resp2["access_token"].(string)
+	if newAT == "" {
+		t.Fatal("no access_token in refresh_token response")
+	}
+
+	// 新 AccessTokenData.IDToken が引き継がれていることを確認
+	jti := jtiFromAccessToken(t, newAT)
+	tokenData, err := st.GetAccessToken(ctx, jti)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tokenData.IDToken != rawIDToken {
+		t.Errorf("AccessTokenData.IDToken after refresh: got %q, want %q", tokenData.IDToken, rawIDToken)
+	}
+}
+
+// TestToken_RefreshGrant_IDToken_Empty_WhenNoIDToken は StoreIDToken=false（デフォルト）のとき
+// refresh_token グラントでも IDToken が空のままであることを検証する（後方互換）。
+func TestToken_RefreshGrant_IDToken_Empty_WhenNoIDToken(t *testing.T) {
+	srv, st, rt, _ := setupTokenServerWithRefreshToken(t) // IDToken なし
+	ctx := context.Background()
+
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {rt},
+		"client_id":     {"test-oauth-client"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	newAT, _ := resp["access_token"].(string)
+
+	jti := jtiFromAccessToken(t, newAT)
+	tokenData, err := st.GetAccessToken(ctx, jti)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tokenData.IDToken != "" {
+		t.Errorf("IDToken should be empty when StoreIDToken=false, got %q", tokenData.IDToken)
+	}
+}
+
 // 補助: Validator=nil（既定）なら従来通り 302 を返す（回帰確認）。
 func TestOAuthServer_RedirectToLogin_NoValidator_Returns302(t *testing.T) {
 	srv := setupOAuthServer(t, "https://app.example.com", "")
