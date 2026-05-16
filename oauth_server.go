@@ -566,8 +566,8 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		)
 
 		// 既存の familyID を引き継いで新 access_token + refresh_token を発行
-		// refresh_token フロー: IDToken はセッション外で取得不可のため空文字列を渡す
-		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID, "")
+		// RefreshTokenData.IDToken を引き継ぐことで、refresh 後も federated モードが動作し続ける
+		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID, data.IDToken)
 
 	default:
 		s.tokenError(w, "unsupported_grant_type", "unsupported grant_type", http.StatusBadRequest)
@@ -658,6 +658,7 @@ func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request,
 		IssuedAt:   now,
 		ExpiresAt:  now.Add(s.refreshTokenTTL),
 		Used:       false,
+		IDToken:    idToken,
 	}
 	if err := s.store.SetRefreshToken(ctx, refreshTokenID, rtData, s.refreshTokenTTL); err != nil {
 		s.tokenError(w, "server_error", "failed to store refresh token", http.StatusInternalServerError)

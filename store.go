@@ -181,6 +181,11 @@ type RefreshTokenData struct {
 
 	// Used は消費済みフラグ。ConsumeRefreshToken で true に更新される。
 	Used bool
+
+	// IDToken は Config.StoreIDToken = true のとき、IdP が発行した生の ID Token 文字列。
+	// refresh_token グラント時に新 AccessTokenData.IDToken に引き継がれる。
+	// StoreIDToken = false（デフォルト）の場合は空文字列。
+	IDToken string
 }
 
 // ClientData は動的登録されたクライアントの情報を保持する（RFC 7591）。
