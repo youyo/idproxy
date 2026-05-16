@@ -114,24 +114,26 @@ type Config struct {
 	// Validator 内 panic は BrowserAuth 側で recover して 500 を返す。
 	PostLoginRedirectValidator func(redirectTo string) error
 
-	// StoreIDToken は認証完了時に IdP から受け取った生の ID Token を
-	// User.IDToken にセットするかどうかを指定する。
+	// StoreIDToken は、セッションに保存済みの生の ID Token を
+	// UserFromContext(ctx).IDToken 経由でハンドラーに公開するかどうかを指定する。
 	//
 	// デフォルト: false（既存動作を維持）。
 	//
-	// true にすると、OIDC コールバック（ブラウザ認証フロー）経由で
-	// ログインしたユーザーの User.IDToken に IdP の ID Token 文字列がセットされる。
-	// セッション継続中は UserFromContext(ctx).IDToken で取得可能。
+	// 注意: ID Token はこの設定に関わらず常にセッションストアに保存される。
+	// この設定は「保存するかどうか」ではなく「コンテキストへ露出するかどうか」を制御する。
+	//
+	// true にすると、OIDC コールバック（ブラウザ認証フロー）経由でログインしたとき、
+	// UserFromContext(ctx).IDToken に IdP が発行した ID Token 文字列がセットされる。
+	// Bearer Token フロー（セッションなし）では常に空文字列となる。
 	//
 	// 主な用途: AWS STS AssumeRoleWithWebIdentity など、
 	// IdP が発行したトークンをそのままダウンストリームサービスに渡す必要がある場合。
 	//
 	// 注意:
-	//   - ID Token はセッションストアに保存される。ストアの暗号化が有効であることを確認すること。
+	//   - ストアの暗号化が有効であることを確認すること。
 	//   - ID Token の有効期限（exp クレーム）はセッション有効期限より短い場合がある（多くの
-	//     IdP では約 1 時間）。AWS STS AssumeRoleWithWebIdentity 等でこの Token を使用する
-	//     場合、呼び出し側で exp クレームを確認してから使用すること。期限切れの Token は
-	//     STS に拒否されるが、UserFromContext(ctx).IDToken は空でない文字列を返し続ける。
+	//     IdP では約 1 時間）。IDToken を使用する際は呼び出し側で exp を確認すること。
+	//     期限切れでも UserFromContext(ctx).IDToken は空でない文字列を返し続ける。
 	StoreIDToken bool
 }
 
