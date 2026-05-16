@@ -9,6 +9,10 @@ type contextKey struct{}
 var userContextKey = contextKey{}
 
 // User は認証済みユーザーの情報を保持する。
+//
+// 注意（移行): IDToken フィールドの追加により、unkeyed struct literal
+//（例: idproxy.User{"email", "name", ...}）を使用しているコードはコンパイルエラーになる。
+// keyed literal（例: idproxy.User{Email: "...", Name: "..."}）に移行すること。
 type User struct {
 	// Email はユーザーのメールアドレス。
 	Email string
@@ -24,6 +28,11 @@ type User struct {
 
 	// Claims は ID Token の全クレーム。
 	Claims map[string]interface{}
+
+	// IDToken は IdP が発行した生の ID Token 文字列。
+	// Config.StoreIDToken = true の場合のみセットされる。
+	// AWS STS AssumeRoleWithWebIdentity 等、IdP トークンが必要な用途に使用する。
+	IDToken string
 }
 
 // UserFromContext はリクエストコンテキストから認証済みユーザー情報を取得する。

@@ -734,3 +734,91 @@ func TestWrap_SessionExpiredAt(t *testing.T) {
 		t.Errorf("expected 302 for expired session, got %d", rec.Code)
 	}
 }
+
+// TestWrap_StoreIDToken_True は StoreIDToken=true のとき sess.IDToken が
+// UserFromContext で取得できることを検証する。
+func TestWrap_StoreIDToken_True(t *testing.T) {
+	a, _ := setupAuth(t, func(cfg *Config) {
+		cfg.StoreIDToken = true
+	})
+
+	ctx := context.Background()
+	user := &User{
+		Email:   "test@example.com",
+		Subject: "sub-123",
+		Claims:  map[string]interface{}{"email": "test@example.com"},
+	}
+	rawIDToken := "eyJhbGciOiJSUzI1NiJ9.test-id-token"
+	sess, err := a.sessionManager.IssueSession(ctx, user, "https://accounts.google.com", rawIDToken)
+	if err != nil {
+		t.Fatalf("IssueSession() failed: %v", err)
+	}
+
+	cookieRec := httptest.NewRecorder()
+	if err := a.sessionManager.SetCookie(cookieRec, sess.ID); err != nil {
+		t.Fatalf("SetCookie() failed: %v", err)
+	}
+
+	var gotUser *User
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Cookie", cookieRec.Header().Get("Set-Cookie"))
+	rec := httptest.NewRecorder()
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if gotUser == nil {
+		t.Fatal("User should be injected into context")
+	}
+	if gotUser.IDToken != rawIDToken {
+		t.Errorf("IDToken: got %q, want %q", gotUser.IDToken, rawIDToken)
+	}
+	// Claims マップが深くコピーされていること（元の User と別インスタンス）
+	if gotUser.Claims == nil {
+		t.Fatal("Claims should not be nil")
+	}
+	// 元の user.Claims への変更が gotUser.Claims に波及しないことを確認
+	user.Claims["extra"] = "injected"
+	if _, ok := gotUser.Claims["extra"]; ok {
+		t.Error("Claims should be deep-copied: mutation of original Claims affected gotUser.Claims")
+	}
+}
+
+// TestWrap_StoreIDToken_False は StoreIDToken=false（デフォルト）のとき
+// IDToken が空のままであることを検証する（後方互換）。
+func TestWrap_StoreIDToken_False(t *testing.T) {
+	a, _ := setupAuth(t) // StoreIDToken=false（デフォルト）
+
+	ctx := context.Background()
+	user := &User{Email: "test@example.com", Subject: "sub-123"}
+	sess, err := a.sessionManager.IssueSession(ctx, user, "https://accounts.google.com", "some-id-token")
+	if err != nil {
+		t.Fatalf("IssueSession() failed: %v", err)
+	}
+
+	cookieRec := httptest.NewRecorder()
+	if err := a.sessionManager.SetCookie(cookieRec, sess.ID); err != nil {
+		t.Fatalf("SetCookie() failed: %v", err)
+	}
+
+	var gotUser *User
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Cookie", cookieRec.Header().Get("Set-Cookie"))
+	rec := httptest.NewRecorder()
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if gotUser == nil {
+		t.Fatal("User should be injected into context")
+	}
+	if gotUser.IDToken != "" {
+		t.Errorf("IDToken should be empty when StoreIDToken=false, got %q", gotUser.IDToken)
+	}
+}

@@ -113,6 +113,28 @@ type Config struct {
 	// Validator が non-nil でエラーを返した場合、入力起因のため 400 を返す（500 ではない）。
 	// Validator 内 panic は BrowserAuth 側で recover して 500 を返す。
 	PostLoginRedirectValidator func(redirectTo string) error
+
+	// StoreIDToken は、セッションに保存済みの生の ID Token を
+	// UserFromContext(ctx).IDToken 経由でハンドラーに公開するかどうかを指定する。
+	//
+	// デフォルト: false（既存動作を維持）。
+	//
+	// 注意: ID Token はこの設定に関わらず常にセッションストアに保存される。
+	// この設定は「保存するかどうか」ではなく「コンテキストへ露出するかどうか」を制御する。
+	//
+	// true にすると、OIDC コールバック（ブラウザ認証フロー）経由でログインしたとき、
+	// UserFromContext(ctx).IDToken に IdP が発行した ID Token 文字列がセットされる。
+	// Bearer Token フロー（セッションなし）では常に空文字列となる。
+	//
+	// 主な用途: AWS STS AssumeRoleWithWebIdentity など、
+	// IdP が発行したトークンをそのままダウンストリームサービスに渡す必要がある場合。
+	//
+	// 注意:
+	//   - ストアの暗号化が有効であることを確認すること。
+	//   - ID Token の有効期限（exp クレーム）はセッション有効期限より短い場合がある（多くの
+	//     IdP では約 1 時間）。IDToken を使用する際は呼び出し側で exp を確認すること。
+	//     期限切れでも UserFromContext(ctx).IDToken は空でない文字列を返し続ける。
+	StoreIDToken bool
 }
 
 // OIDCProvider は1つの OIDC プロバイダーの設定を保持する。
