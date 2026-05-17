@@ -136,3 +136,22 @@ func copyArgs() []string {
 func setArgs(a []string) {
 	os.Args = a
 }
+
+// TestHelpFallbackToServe は -h/--help が serve のヘルプにフォールバックすることを確認する。
+func TestHelpFallbackToServe(t *testing.T) {
+	origServe, origArgs := runServeFn, copyArgs()
+	defer func() { runServeFn = origServe; setArgs(origArgs) }()
+
+	var serveCalled bool
+	runServeFn = func() error { serveCalled = true; return nil }
+
+	for _, flag := range []string{"-h", "--help"} {
+		serveCalled = false
+		if err := dispatch([]string{flag}); err != nil {
+			t.Fatalf("dispatch(%s) error: %v", flag, err)
+		}
+		if !serveCalled {
+			t.Errorf("dispatch(%s) should fallback to runServeFn", flag)
+		}
+	}
+}

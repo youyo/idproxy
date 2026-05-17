@@ -245,11 +245,18 @@ func printSummary(w io.Writer, s summary) {
 	_, _ = fmt.Fprintf(w, "App:             %s\n", s.DisplayName)
 	_, _ = fmt.Fprintf(w, "Client ID:       %s\n", s.AppID)
 	_, _ = fmt.Fprintf(w, "Tenant:          %s\n", s.TenantID)
-	_, _ = fmt.Fprintf(w, "OIDC Issuer:     %s\n", issuer)
+	if s.TenantID != "(unknown)" {
+		_, _ = fmt.Fprintf(w, "OIDC Issuer:     %s\n", issuer)
+	}
 	_, _ = fmt.Fprintf(w, "Redirect URI:    %s\n", s.Callback)
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "Set these environment variables:")
-	_, _ = fmt.Fprintf(w, "OIDC_ISSUER=%s\n", issuer)
+	if s.TenantID != "(unknown)" {
+		_, _ = fmt.Fprintf(w, "OIDC_ISSUER=%s\n", issuer)
+	} else {
+		_, _ = fmt.Fprintln(w, "# OIDC_ISSUER: tenant ID could not be detected; set manually:")
+		_, _ = fmt.Fprintln(w, "# OIDC_ISSUER=https://login.microsoftonline.com/<your-tenant-id>/v2.0")
+	}
 	_, _ = fmt.Fprintf(w, "OIDC_CLIENT_ID=%s\n", s.AppID)
 	if s.Secret != "" {
 		_, _ = fmt.Fprintf(w, "OIDC_CLIENT_SECRET=%s\n", s.Secret)

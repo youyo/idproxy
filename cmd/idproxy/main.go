@@ -42,8 +42,8 @@ func dispatch(args []string) error {
 		os.Args = append([]string{os.Args[0]}, args[1:]...)
 		return runServeFn()
 	case "-h", "--help":
-		printRootUsage(os.Stdout)
-		return nil
+		// 従来の `idproxy --help` は serve のヘルプを表示していた。後方互換性を維持する。
+		return runServeFn()
 	default:
 		// 不明なコマンド → 既存の serve は flag を直接読むため、先頭が "-"（フラグ）なら
 		// 後方互換のため serve として実行する。

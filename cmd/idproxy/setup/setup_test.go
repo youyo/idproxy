@@ -636,13 +636,14 @@ func TestRunEntraID_tenantIDFailure(t *testing.T) {
 			"az account show":            {Out: nil, Err: fmt.Errorf("not logged in")},
 		},
 	}
+	var stdout strings.Builder
 	var stderr strings.Builder
 	opts := Options{
 		InstanceName:   "amg",
 		ExternalURL:    "https://example.com",
 		NonInteractive: true,
 		Exec:           stub,
-		Stdout:         io.Discard,
+		Stdout:         &stdout,
 		Stderr:         &stderr,
 	}
 	if err := Run(context.Background(), opts); err != nil {
@@ -650,6 +651,10 @@ func TestRunEntraID_tenantIDFailure(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "warning:") {
 		t.Errorf("expected warning message in stderr, got: %q", stderr.String())
+	}
+	// stdout にはコメント形式で表示されること
+	if !strings.Contains(stdout.String(), "# OIDC_ISSUER:") {
+		t.Errorf("expected commented-out OIDC_ISSUER in stdout, got: %q", stdout.String())
 	}
 }
 
