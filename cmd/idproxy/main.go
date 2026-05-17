@@ -1,100 +1,56 @@
 package main
 
 import (
-	"context"
-	"flag"
 	"fmt"
-	"log/slog"
-	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
-	idproxy "github.com/youyo/idproxy"
+	"github.com/youyo/idproxy/cmd/idproxy/setup"
+)
+
+// runServeFn / runSetupFn はテスト注入用の関数変数。
+// router の経路を検証する際にスタブへ差し替えるため var にしている。
+var (
+	runServeFn = runServe
+	runSetupFn = setup.RunCLI
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := dispatch(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	flag.Usage = printUsage
-	flag.Parse()
-
-	cfg, upstream, listenAddr, err := parseConfig()
-	if err != nil {
-		return err
+// dispatch は os.Args[1:] を受け取り、サブコマンドに応じたハンドラーを呼び出す。
+//   - "setup"             → runSetupFn(args[1:])
+//   - "serve" / 空        → runServeFn()（後方互換）
+//   - "-h" / "--help"     → ルーター usage を出力
+//   - その他              → エラー
+//
+// 注: serve 用フラグは引き続き flag.CommandLine（グローバル）を使う。
+// runServe 内で flag.Parse() を呼ぶため、ここで os.Args を書き換える必要がある場合は
+// セットアップサブコマンド側に分岐した後で行う。
+func dispatch(args []string) error {
+	if len(args) == 0 {
+		return runServeFn()
 	}
-
-	logger := slog.Default()
-	cfg.Logger = logger
-
-	// Initialize Auth
-	ctx := context.Background()
-	auth, err := idproxy.New(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("failed to initialize auth: %w", err)
-	}
-
-	// Configure reverse proxy
-	proxy, err := newReverseProxy(upstream)
-	if err != nil {
-		return fmt.Errorf("failed to create reverse proxy: %w", err)
-	}
-
-	// Set up routing
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthzHandler)
-	mux.Handle("/", auth.Wrap(proxy))
-
-	srv := &http.Server{
-		Addr:    listenAddr,
-		Handler: mux,
-	}
-
-	// Graceful shutdown
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	go func() {
-		logger.Info("starting server", "addr", listenAddr, "upstream", upstream)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("server error", "error", err)
+	switch args[0] {
+	case "setup":
+		return runSetupFn(args[1:])
+	case "serve":
+		// "serve" を取り除いたうえで flag.Parse() に残りを通すため os.Args を縮める
+		os.Args = append([]string{os.Args[0]}, args[1:]...)
+		return runServeFn()
+	case "-h", "--help":
+		printRootUsage(os.Stdout)
+		return nil
+	default:
+		// 不明なコマンド → 既存の serve は flag を直接読むため、先頭が "-"（フラグ）なら
+		// 後方互換のため serve として実行する。
+		if args[0][0] == '-' {
+			return runServeFn()
 		}
-	}()
-
-	<-ctx.Done()
-	logger.Info("shutting down server")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	return srv.Shutdown(shutdownCtx)
-}
-
-// newReverseProxy creates a reverse proxy to the upstream URL.
-// FlushInterval: -1 enables SSE streaming passthrough.
-func newReverseProxy(upstream string) (*httputil.ReverseProxy, error) {
-	target, err := url.Parse(upstream)
-	if err != nil {
-		return nil, fmt.Errorf("invalid upstream URL: %w", err)
+		printRootUsage(os.Stderr)
+		return fmt.Errorf("unknown command: %s", args[0])
 	}
-
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.FlushInterval = -1 // SSE streaming: flush responses immediately
-
-	return proxy, nil
-}
-
-// healthzHandler is the health check endpoint.
-func healthzHandler(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprint(w, "ok")
 }
