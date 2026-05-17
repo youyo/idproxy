@@ -134,6 +134,8 @@ idproxy setup entra-id \
 
 > `PATH_PREFIX` を設定する場合は `--path-prefix /auth` を追加してください。
 
+> アプリ登録名のプレフィックスを変更するには `--name-prefix "my-company-"` を追加してください（デフォルト: `idproxy-`）。
+
 **非対話モード**（CI/CD 向け）:
 
 ```bash

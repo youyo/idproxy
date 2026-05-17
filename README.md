@@ -137,6 +137,8 @@ The command will:
 
 > If `PATH_PREFIX` is configured, pass `--path-prefix /auth` to generate the correct callback URL.
 
+> To use a custom app name prefix (instead of `idproxy-`), add `--name-prefix "my-company-"`.
+
 **Non-interactive mode** (for CI/CD):
 
 ```bash

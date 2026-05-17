@@ -22,6 +22,8 @@ type Options struct {
 	AppID          string
 	RotateSecret   bool
 	NonInteractive bool
+	// NamePrefix はアプリ登録名の先頭部分。空の場合は "idproxy-" をデフォルトとして使う。
+	NamePrefix string
 
 	// 注入ポイント
 	Exec   CommandExecutor
@@ -55,6 +57,7 @@ func RunCLI(args []string) error {
 	fs.StringVar(&opts.AppID, "app-id", "", "既存アプリID（N>1競合時に指定）")
 	fs.BoolVar(&opts.RotateSecret, "rotate-secret", false, "既存アプリの client_secret を再生成する")
 	fs.BoolVar(&opts.NonInteractive, "non-interactive", false, "全入力をフラグから取得（E2E/CI 用）")
+	fs.StringVar(&opts.NamePrefix, "name-prefix", "idproxy-", "アプリ登録名のプレフィックス（デフォルト: idproxy-）")
 
 	// サブサブコマンド: 先頭引数が "entra-id" であることを期待する
 	if len(args) == 0 {
@@ -98,6 +101,7 @@ Flags:
   --app-id string           既存アプリID（N>1競合時に明示指定）
   --rotate-secret           既存アプリの client_secret を再生成する
   --non-interactive         全入力をフラグから取得（E2E/CI 用）
+  --name-prefix string      アプリ登録名のプレフィックス（デフォルト: idproxy-）
 `)
 }
 
@@ -144,7 +148,12 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	displayName := "idproxy-" + opts.InstanceName
+	// NamePrefix が空の場合はデフォルト値 "idproxy-" を使う
+	prefix := opts.NamePrefix
+	if prefix == "" {
+		prefix = "idproxy-"
+	}
+	displayName := prefix + opts.InstanceName
 	az := NewAZClient(opts.Exec)
 
 	var app *App

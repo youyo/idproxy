@@ -658,6 +658,87 @@ func TestRunEntraID_tenantIDFailure(t *testing.T) {
 	}
 }
 
+// --name-prefix フラグでアプリ登録名のプレフィックスを変更できること
+func TestRunEntraID_customNamePrefix(t *testing.T) {
+	stub := &StubExecutor{
+		Responses: map[string]StubResponse{
+			"az ad app list":             {Out: []byte(`[]`), Err: nil},
+			"az ad app create":           {Out: []byte(`{"appId":"aid1","id":"oid1","displayName":"my-app-amg"}`), Err: nil},
+			"az ad app credential reset": {Out: []byte(`{"secretText":"s3cr3t"}`), Err: nil},
+			"az ad app show":             {Out: []byte(`null`), Err: nil},
+			"az ad app update":           {Out: []byte(`{}`), Err: nil},
+			"az account show":            {Out: []byte(`"tenant-1"`), Err: nil},
+		},
+	}
+	var stdout strings.Builder
+	opts := Options{
+		InstanceName:   "amg",
+		ExternalURL:    "https://example.com",
+		NamePrefix:     "my-app-",
+		NonInteractive: true,
+		Exec:           stub,
+		Stdout:         &stdout,
+		Stderr:         io.Discard,
+	}
+	if err := Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// CreateApp に渡された displayName が "my-app-amg" であること
+	var found bool
+	for _, call := range stub.Calls {
+		if call.Name == "az" {
+			for i, arg := range call.Args {
+				if arg == "--display-name" && i+1 < len(call.Args) && call.Args[i+1] == "my-app-amg" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected az ad app create --display-name my-app-amg, calls: %+v", stub.Calls)
+	}
+}
+
+// NamePrefix が空文字の場合はデフォルト "idproxy-" が使われること
+func TestRunEntraID_defaultNamePrefix(t *testing.T) {
+	stub := &StubExecutor{
+		Responses: map[string]StubResponse{
+			"az ad app list":             {Out: []byte(`[]`), Err: nil},
+			"az ad app create":           {Out: []byte(`{"appId":"aid1","id":"oid1","displayName":"idproxy-amg"}`), Err: nil},
+			"az ad app credential reset": {Out: []byte(`{"secretText":"s3cr3t"}`), Err: nil},
+			"az ad app show":             {Out: []byte(`null`), Err: nil},
+			"az ad app update":           {Out: []byte(`{}`), Err: nil},
+			"az account show":            {Out: []byte(`"tenant-1"`), Err: nil},
+		},
+	}
+	opts := Options{
+		InstanceName:   "amg",
+		ExternalURL:    "https://example.com",
+		NamePrefix:     "", // 空 → "idproxy-" になること
+		NonInteractive: true,
+		Exec:           stub,
+		Stdout:         io.Discard,
+		Stderr:         io.Discard,
+	}
+	if err := Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	var found bool
+	for _, call := range stub.Calls {
+		if call.Name == "az" {
+			for i, arg := range call.Args {
+				if arg == "--display-name" && i+1 < len(call.Args) && call.Args[i+1] == "idproxy-amg" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected default prefix 'idproxy-', calls: %+v", stub.Calls)
+	}
+}
+
 // 修正3: secret 取得後にリダイレクト URI 設定で失敗した場合、PARTIAL SUCCESS を stderr に出力すること
 func TestRunEntraID_partialSuccessOnRedirectURIFailure(t *testing.T) {
 	stub := &StubExecutor{
