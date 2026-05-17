@@ -322,6 +322,22 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		s.redirectToLogin(w, r)
 		return
 	}
+	// StoreIDToken=true の場合、IDToken が期限切れなら強制再ログイン。
+	// 古い IDToken を使って AccessTokenData.IDToken に期限切れトークンが伝播するのを防ぐ。
+	if s.config.StoreIDToken && sess.IDToken != "" {
+		// 署名検証なしで exp クレームだけ読む
+		p := jwt.NewParser(jwt.WithoutClaimsValidation())
+		if tok, _, err := p.ParseUnverified(sess.IDToken, jwt.MapClaims{}); err == nil {
+			if exp, err := tok.Claims.GetExpirationTime(); err == nil && exp != nil {
+				if time.Now().After(exp.Time) {
+					s.logger.Info("oauth authorize: IDToken expired, forcing re-login",
+						"client_id", clientID, "exp", exp.Time)
+					s.redirectToLogin(w, r)
+					return
+				}
+			}
+		}
+	}
 
 	// --- 認証済み: 認可コード生成 ---
 	codeBytes := make([]byte, 32)
