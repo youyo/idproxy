@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# fake-az: az CLI をエミュレートするテスト用スタブ
+# 呼び出し記録を $FAKE_AZ_CALL_LOG に追記する
+
+LOG="${FAKE_AZ_CALL_LOG:-/tmp/fake-az-calls.log}"
+echo "$*" >> "$LOG"
+
+# 引数のパターンマッチで応答を変える
+case "$*" in
+  "ad app list"*)
+    echo '[]'
+    ;;
+  "ad app create"*)
+    echo '{"appId":"test-app-id-1234","id":"test-obj-id-5678","displayName":"idproxy-testamg"}'
+    ;;
+  "ad app credential reset"*)
+    echo '{"secretText":"test-secret-value"}'
+    ;;
+  "ad app show"*)
+    echo 'null'
+    ;;
+  "ad app update"*)
+    echo '{}'
+    ;;
+  "account show"*)
+    echo '"test-tenant-id-9999"'
+    ;;
+  *)
+    echo "fake-az: unknown command: $*" >&2
+    exit 1
+    ;;
+esac

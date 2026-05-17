@@ -20,6 +20,14 @@ run = "go test -race ./..."
 description = "Run integration tests"
 run = "go test -race -tags=integration ./..."
 
+[tasks."test:e2e"]
+description = "E2E テスト（fake az を使う）"
+run = """
+go build -o ./idproxy ./cmd/idproxy
+IDPROXY_E2E=1 go test -tags=e2e -v ./e2e/...
+rm -f ./idproxy
+"""
+
 [tasks.vet]
 description = "Run go vet"
 run = "go vet ./..."

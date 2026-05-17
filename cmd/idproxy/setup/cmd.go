@@ -137,10 +137,10 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.InstanceName == "" {
 		return fmt.Errorf("--instance-name is required")
 	}
-	if opts.ExternalURL == "" {
-		return fmt.Errorf("--external-url is required")
-	}
 	if err := ValidateInstanceName(opts.InstanceName); err != nil {
+		return err
+	}
+	if err := validateExternalURL(opts.ExternalURL); err != nil {
 		return err
 	}
 
@@ -254,6 +254,21 @@ func printSummary(w io.Writer, s summary) {
 	if s.Secret != "" {
 		_, _ = fmt.Fprintf(w, "OIDC_CLIENT_SECRET=%s\n", s.Secret)
 	}
+}
+
+// validateExternalURL は外部公開 URL の最小検証を行う。
+// 規則は config.go の ExternalURL 検証（Validate メソッド）と揃える。
+func validateExternalURL(u string) error {
+	if u == "" {
+		return fmt.Errorf("--external-url is required")
+	}
+	if !strings.HasPrefix(u, "https://") &&
+		!strings.HasPrefix(u, "http://localhost") &&
+		!strings.HasPrefix(u, "http://127.0.0.1") &&
+		!strings.HasPrefix(u, "http://[::1]") {
+		return fmt.Errorf("--external-url must start with https:// (got %q)", u)
+	}
+	return nil
 }
 
 // promptMissing は対話モードで未入力のフラグを補完する。

@@ -10,6 +10,30 @@ import (
 	"testing"
 )
 
+// ValidateExternalURL ---------------------------------------------------------
+
+func TestValidateExternalURL(t *testing.T) {
+	tests := []struct {
+		in      string
+		wantErr bool
+	}{
+		{"https://example.com", false},
+		{"https://proxy.example.com/path", false},
+		{"http://localhost:8080", false},
+		{"http://127.0.0.1:8080", false},
+		{"http://[::1]:8080", false},
+		{"http://example.com", true},  // http は不可
+		{"ftp://example.com", true},
+		{"", true},
+	}
+	for _, tt := range tests {
+		err := validateExternalURL(tt.in)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("validateExternalURL(%q) error=%v, wantErr=%v", tt.in, err, tt.wantErr)
+		}
+	}
+}
+
 // ValidateInstanceName --------------------------------------------------------
 
 func TestValidateInstanceName_valid(t *testing.T) {
