@@ -94,19 +94,66 @@ services:
 
 ## Provider Setup
 
-| Provider | `OIDC_ISSUER` | Setup Guide |
-|----------|--------------|-------------|
-| Google | `https://accounts.google.com` | [OpenID Connect — Google Identity](https://developers.google.com/identity/openid-connect/openid-connect) |
-| Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` | [Register an application — Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app) |
-| Amazon Cognito | `https://cognito-idp.{region}.amazonaws.com/{user-pool-id}` | [Configure user pool app client — Amazon Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-app-idp-settings.html) |
-
-For Amazon Cognito, request scopes `openid email profile` on the App Client. Cognito ID tokens may omit the `name` claim depending on user pool configuration; idproxy automatically falls back to `cognito:username` (and then `preferred_username`) for the user's display name.
+| Provider | `OIDC_ISSUER` |
+|----------|--------------|
+| Microsoft Entra ID | `https://login.microsoftonline.com/{tenant-id}/v2.0` |
+| Google | `https://accounts.google.com` |
+| Amazon Cognito | `https://cognito-idp.{region}.amazonaws.com/{user-pool-id}` |
 
 When registering idproxy as a client in your OIDC provider, set the redirect URI to:
 
 ```
-{EXTERNAL_URL}/auth/callback
+{EXTERNAL_URL}/callback
 ```
+
+### Microsoft Entra ID
+
+#### 1. Register an application
+
+[Azure Portal](https://portal.azure.com) → **Microsoft Entra ID** → **App registrations** → **New registration**
+
+- **Supported account types**: *Accounts in this organizational directory only*
+- **Redirect URI**: set after your deployment URL is known (see below)
+
+From the **Overview** page, collect:
+- **Application (client) ID** → `OIDC_CLIENT_ID`
+- **Directory (tenant) ID** → use in `OIDC_ISSUER`: `https://login.microsoftonline.com/{tenant-id}/v2.0`
+
+#### 2. Create a client secret
+
+**Certificates & secrets** → **Client secrets** → **New client secret** → copy the **Value** immediately.
+
+This is `OIDC_CLIENT_SECRET`.
+
+#### 3. Add API permissions
+
+**API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions** → add:
+
+- `openid`
+- `email`
+- `profile`
+
+Then click **Grant admin consent** to avoid per-user consent prompts.
+
+#### 4. Add optional claims to the ID token
+
+**Token configuration** → **Add optional claim** → **Token type: ID** → check **`email`** → **Add**.
+
+> `name` (display name) is included automatically with the `profile` scope. `family_name` and `given_name` are not required.
+
+#### 5. Set the redirect URI
+
+**Authentication** → **Add a platform** → **Web** → set:
+
+```
+{EXTERNAL_URL}/callback
+```
+
+> If `PATH_PREFIX` is set (e.g. `PATH_PREFIX=/auth`), append the prefix: `{EXTERNAL_URL}/auth/callback`.
+
+### Amazon Cognito
+
+Request scopes `openid email profile` on the App Client. Cognito ID tokens may omit the `name` claim depending on user pool configuration; idproxy automatically falls back to `cognito:username` (and then `preferred_username`) for the user's display name.
 
 ## Library Usage
 
