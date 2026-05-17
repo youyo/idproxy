@@ -106,6 +106,48 @@ When registering idproxy as a client in your OIDC provider, set the redirect URI
 {EXTERNAL_URL}/callback
 ```
 
+### Automated Setup with `idproxy setup entra-id` (Recommended)
+
+Instead of configuring Entra ID manually through the Azure Portal, you can use the built-in setup command:
+
+**Prerequisites**
+
+- [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) installed (`brew install azure-cli` on macOS)
+- Logged in to Azure CLI:
+
+```bash
+az login
+# If running in a headless environment (no browser):
+az login --use-device-code
+```
+
+**Run the setup command**
+
+```bash
+idproxy setup entra-id \
+  --instance-name my-idproxy \
+  --external-url https://proxy.example.com
+```
+
+The command will:
+1. Create (or reuse) an Entra ID app registration named `idproxy-{instance-name}`
+2. Generate a client secret
+3. Register `{external-url}/callback` as a redirect URI
+4. Print the environment variables to set
+
+> If `PATH_PREFIX` is configured, pass `--path-prefix /auth` to generate the correct callback URL.
+
+**Non-interactive mode** (for CI/CD):
+
+```bash
+idproxy setup entra-id \
+  --instance-name my-idproxy \
+  --external-url https://proxy.example.com \
+  --non-interactive
+```
+
+The manual steps below describe the equivalent portal workflow if you prefer to configure Entra ID by hand.
+
 ### Microsoft Entra ID
 
 #### 1. Register an application

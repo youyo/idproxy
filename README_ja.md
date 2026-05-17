@@ -102,6 +102,47 @@ services:
 
 Amazon Cognito を使う場合は App Client の許可スコープに `openid email profile` を含めてください。Cognito の ID Token はユーザープールの構成によって `name` クレームを含まないことがあります。その場合 idproxy は自動的に `cognito:username`（さらに `preferred_username`）を表示名として fallback します。
 
+### Microsoft Entra ID の自動セットアップ（推奨）
+
+Azure Portal での手動設定の代わりに、`idproxy setup entra-id` コマンドを使うと Entra ID のアプリ登録を自動化できます。
+
+**前提条件**
+
+- [Azure CLI](https://learn.microsoft.com/ja-jp/cli/azure/install-azure-cli) がインストール済み（macOS なら `brew install azure-cli`）
+- Azure CLI でログイン済み:
+
+```bash
+az login
+# ブラウザが使えない環境（ヘッドレス / CI 等）の場合:
+az login --use-device-code
+```
+
+**セットアップコマンドを実行**
+
+```bash
+idproxy setup entra-id \
+  --instance-name my-idproxy \
+  --external-url https://proxy.example.com
+```
+
+このコマンドは以下を自動で行います：
+
+1. `idproxy-{instance-name}` という名前のアプリ登録を作成（または既存を流用）
+2. クライアントシークレットを生成
+3. `{external-url}/callback` をリダイレクト URI として登録
+4. 設定すべき環境変数を出力
+
+> `PATH_PREFIX` を設定する場合は `--path-prefix /auth` を追加してください。
+
+**非対話モード**（CI/CD 向け）:
+
+```bash
+idproxy setup entra-id \
+  --instance-name my-idproxy \
+  --external-url https://proxy.example.com \
+  --non-interactive
+```
+
 OIDC プロバイダーへ idproxy をクライアントとして登録する際は、リダイレクト URI を以下のように設定してください：
 
 ```
