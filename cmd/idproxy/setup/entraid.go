@@ -54,7 +54,7 @@ func (r rawApp) toApp() App {
 func (c *AZClient) FindApp(ctx context.Context, displayName string) (*App, error) {
 	args := []string{
 		"ad", "app", "list",
-		"--filter", fmt.Sprintf("displayName eq '%s'", displayName),
+		"--filter", fmt.Sprintf("displayName eq '%s'", oDataEscapeSingleQuote(displayName)),
 		"--output", "json",
 	}
 	out, err := c.Exec.Output(ctx, "az", args)
@@ -173,6 +173,12 @@ func (c *AZClient) SetRedirectURIs(ctx context.Context, appID string, uris []str
 		return fmt.Errorf("az ad app update: %w", err)
 	}
 	return nil
+}
+
+// oDataEscapeSingleQuote は OData フィルタ文字列のシングルクオートをエスケープする。
+// OData の慣例: シングルクオートは '' に置換する。
+func oDataEscapeSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }
 
 // GetTenantID は現在ログイン中のテナント ID を返す。

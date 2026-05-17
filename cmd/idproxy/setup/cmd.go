@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -112,12 +113,22 @@ func Run(ctx context.Context, opts Options) error {
 		opts.Exec = RealExecutor{}
 	}
 
-	// 1) az が PATH にあることを確認
 	if _, err := opts.Exec.LookPath("az"); err != nil {
 		return fmt.Errorf("az CLI not found in PATH; install from https://learn.microsoft.com/cli/azure/install-azure-cli (%w)", err)
 	}
 
-	// 2) 必須入力を取得（対話 or フラグ）
+	// 途中失敗時も取得済み secret を表示するための defer
+	// （アプリ登録は完了しているが後続ステップが失敗した場合）
+	var partialSecret string
+	defer func() {
+		if partialSecret != "" {
+			// エラーで終了してもユーザーが secret をコピーできるよう Stderr に出力
+			_, _ = fmt.Fprintf(opts.Stderr, "\n[PARTIAL SUCCESS] Client secret was generated but setup did not complete.\n")
+			_, _ = fmt.Fprintf(opts.Stderr, "OIDC_CLIENT_SECRET=%s\n", partialSecret)
+			_, _ = fmt.Fprintln(opts.Stderr, "Re-run with --rotate-secret=false to continue setup without generating a new secret.")
+		}
+	}()
+
 	if !opts.NonInteractive {
 		if err := promptMissing(&opts); err != nil {
 			return err
@@ -136,7 +147,6 @@ func Run(ctx context.Context, opts Options) error {
 	displayName := "idproxy-" + opts.InstanceName
 	az := NewAZClient(opts.Exec)
 
-	// 3) 既存アプリ検索
 	var app *App
 	var err error
 	if opts.AppID != "" {
@@ -158,7 +168,6 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	// 4) 新規作成 or 既存流用
 	var secret string
 	if app == nil {
 		_, _ = fmt.Fprintf(opts.Stdout, "Creating new app registration: %s\n", displayName)
@@ -170,6 +179,7 @@ func Run(ctx context.Context, opts Options) error {
 		if err != nil {
 			return err
 		}
+		partialSecret = secret
 	} else {
 		_, _ = fmt.Fprintf(opts.Stdout, "Reusing existing app: %s (appId=%s)\n", displayName, app.AppID)
 		if opts.RotateSecret {
@@ -177,10 +187,10 @@ func Run(ctx context.Context, opts Options) error {
 			if err != nil {
 				return err
 			}
+			partialSecret = secret
 		}
 	}
 
-	// 5) Redirect URI のマージ
 	callback := CallbackURI(opts.ExternalURL, opts.PathPrefix)
 	existing, err := az.GetRedirectURIs(ctx, app.AppID)
 	if err != nil {
@@ -193,13 +203,16 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	// 6) Tenant ID 取得
 	tenantID, err := az.GetTenantID(ctx)
 	if err != nil {
-		return err
+		// TenantID 取得失敗はサマリー表示に影響するだけなので警告で続行する。
+		// アプリ登録とリダイレクト URI 設定は完了しているため処理を止めない。
+		_, _ = fmt.Fprintf(opts.Stderr, "warning: could not retrieve tenant ID (%v); OIDC_ISSUER will be incomplete\n", err)
+		tenantID = "(unknown)"
 	}
 
-	// 7) 完了サマリーを出力
+	// ここまで到達したら partial success は不要
+	partialSecret = ""
 	printSummary(opts.Stdout, summary{
 		DisplayName: displayName,
 		AppID:       app.AppID,
@@ -212,12 +225,10 @@ func Run(ctx context.Context, opts Options) error {
 
 // mergeRedirectURIs は既存 URI に callback を追加した結果と、追加が必要かを返す。
 func mergeRedirectURIs(existing []string, callback string) ([]string, bool) {
-	for _, u := range existing {
-		if u == callback {
-			return existing, false
-		}
+	if slices.Contains(existing, callback) {
+		return existing, false
 	}
-	return append(append([]string{}, existing...), callback), true
+	return append(slices.Clone(existing), callback), true
 }
 
 type summary struct {

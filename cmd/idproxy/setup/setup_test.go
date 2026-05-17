@@ -3,6 +3,8 @@ package setup
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -502,6 +504,63 @@ func TestRun_MultipleAppsFound_RequiresAppID(t *testing.T) {
 	}
 }
 
+// mergeRedirectURIs ----------------------------------------------------------
+
+func TestMergeRedirectURIs_newURI(t *testing.T) {
+	existing := []string{"https://a.example.com/callback"}
+	got, changed := mergeRedirectURIs(existing, "https://b.example.com/callback")
+	if !changed {
+		t.Error("changed = false, want true")
+	}
+	want := []string{"https://a.example.com/callback", "https://b.example.com/callback"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mergeRedirectURIs = %v, want %v", got, want)
+	}
+	// 元スライスが変更されていないことを確認
+	if len(existing) != 1 {
+		t.Errorf("existing modified: len = %d, want 1", len(existing))
+	}
+}
+
+func TestMergeRedirectURIs_alreadyPresent(t *testing.T) {
+	existing := []string{"https://a.example.com/callback"}
+	got, changed := mergeRedirectURIs(existing, "https://a.example.com/callback")
+	if changed {
+		t.Error("changed = true, want false")
+	}
+	if !reflect.DeepEqual(got, existing) {
+		t.Errorf("mergeRedirectURIs = %v, want %v", got, existing)
+	}
+}
+
+func TestMergeRedirectURIs_emptyExisting(t *testing.T) {
+	got, changed := mergeRedirectURIs([]string{}, "https://a.example.com/callback")
+	if !changed {
+		t.Error("changed = false, want true")
+	}
+	want := []string{"https://a.example.com/callback"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mergeRedirectURIs = %v, want %v", got, want)
+	}
+}
+
+// oDataEscapeSingleQuote -----------------------------------------------------
+
+func TestODataEscapeSingleQuote(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"amg", "amg"},
+		{"it's", "it''s"},
+		{"a'b'c", "a''b''c"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := oDataEscapeSingleQuote(tt.in)
+		if got != tt.want {
+			t.Errorf("oDataEscapeSingleQuote(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestRun_AzNotInstalled(t *testing.T) {
 	stub := &StubExecutor{
 		LookPathFunc: func(name string) (string, error) { return "", errors.New("not found") },
@@ -538,5 +597,67 @@ func TestRun_InvalidInstanceName(t *testing.T) {
 	err := Run(context.Background(), opts)
 	if err == nil {
 		t.Fatal("expected error for invalid instance name")
+	}
+}
+
+// 修正2: GetTenantID が失敗しても Run がエラーを返さず、警告を出して続行すること
+func TestRunEntraID_tenantIDFailure(t *testing.T) {
+	stub := &StubExecutor{
+		Responses: map[string]StubResponse{
+			"az ad app list":             {Out: []byte(`[]`), Err: nil},
+			"az ad app create":           {Out: []byte(`{"appId":"aid1","id":"oid1","displayName":"idproxy-amg"}`), Err: nil},
+			"az ad app credential reset": {Out: []byte(`{"secretText":"s3cr3t"}`), Err: nil},
+			"az ad app show":             {Out: []byte(`null`), Err: nil},
+			"az ad app update":           {Out: []byte(`{}`), Err: nil},
+			"az account show":            {Out: nil, Err: fmt.Errorf("not logged in")},
+		},
+	}
+	var stderr strings.Builder
+	opts := Options{
+		InstanceName:   "amg",
+		ExternalURL:    "https://example.com",
+		NonInteractive: true,
+		Exec:           stub,
+		Stdout:         io.Discard,
+		Stderr:         &stderr,
+	}
+	if err := Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run() should succeed even when GetTenantID fails, got: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "warning:") {
+		t.Errorf("expected warning message in stderr, got: %q", stderr.String())
+	}
+}
+
+// 修正3: secret 取得後にリダイレクト URI 設定で失敗した場合、PARTIAL SUCCESS を stderr に出力すること
+func TestRunEntraID_partialSuccessOnRedirectURIFailure(t *testing.T) {
+	stub := &StubExecutor{
+		Responses: map[string]StubResponse{
+			"az ad app list":             {Out: []byte(`[]`), Err: nil},
+			"az ad app create":           {Out: []byte(`{"appId":"aid1","id":"oid1","displayName":"idproxy-amg"}`), Err: nil},
+			"az ad app credential reset": {Out: []byte(`{"secretText":"s3cr3t"}`), Err: nil},
+			// GetRedirectURIs で失敗させる（secret 取得後の後続ステップ失敗）
+			"az ad app show": {Out: nil, Err: fmt.Errorf("network error")},
+		},
+	}
+	var stderr strings.Builder
+	opts := Options{
+		InstanceName:   "amg",
+		ExternalURL:    "https://example.com",
+		NonInteractive: true,
+		Exec:           stub,
+		Stdout:         io.Discard,
+		Stderr:         &stderr,
+	}
+	err := Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Run() should return error when GetRedirectURIs fails")
+	}
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "[PARTIAL SUCCESS]") {
+		t.Errorf("expected [PARTIAL SUCCESS] in stderr, got: %q", stderrStr)
+	}
+	if !strings.Contains(stderrStr, "OIDC_CLIENT_SECRET=s3cr3t") {
+		t.Errorf("expected OIDC_CLIENT_SECRET=s3cr3t in stderr, got: %q", stderrStr)
 	}
 }
