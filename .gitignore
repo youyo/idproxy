@@ -37,3 +37,4 @@ Thumbs.db
 
 # Serena (semantic code tool local state)
 .serena/
+.env
