@@ -25,6 +25,8 @@ type MockIdP struct {
 	privateKey  *ecdsa.PrivateKey
 	keyID       string
 	codes       map[string]codeEntry
+	// refreshTokens は refresh_token grant 用のトークンエントリ。
+	refreshTokens   map[string]refreshEntry
 	extraClaims map[string]any
 	mu          sync.Mutex
 }
@@ -34,6 +36,13 @@ type codeEntry struct {
 	subject  string
 	email    string
 	nonce    string
+	clientID string
+}
+
+// refreshEntry は refresh_token に紐づくユーザー情報を保持する。
+type refreshEntry struct {
+	subject  string
+	email    string
 	clientID string
 }
 
@@ -55,9 +64,10 @@ func NewMockIdP(t testing.TB) *MockIdP {
 	keyID := hex.EncodeToString(kidBytes)
 
 	m := &MockIdP{
-		privateKey: privateKey,
-		keyID:      keyID,
-		codes:      make(map[string]codeEntry),
+		privateKey:    privateKey,
+		keyID:         keyID,
+		codes:         make(map[string]codeEntry),
+		refreshTokens: make(map[string]refreshEntry),
 	}
 
 	mux := http.NewServeMux()
@@ -126,6 +136,27 @@ func (m *MockIdP) IssueAccessToken(issuer, audience, subject, email, name, jti s
 	token.Header["kid"] = m.keyID
 
 	return token.SignedString(m.privateKey)
+}
+
+// IssueRefreshToken は指定した subject/email/clientID に紐づく refresh_token を直接生成する。
+// テストで IdP refresh_token grant フローを検証したい場合に使用する。
+// 返される refresh_token を oauth2.Token{RefreshToken: ...} に設定して TokenSource で使う。
+func (m *MockIdP) IssueRefreshToken(subject, email, clientID string) string {
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		panic("MockIdP.IssueRefreshToken: rand.Read failed: " + err.Error())
+	}
+	token := hex.EncodeToString(tokenBytes)
+
+	m.mu.Lock()
+	m.refreshTokens[token] = refreshEntry{
+		subject:  subject,
+		email:    email,
+		clientID: clientID,
+	}
+	m.mu.Unlock()
+
+	return token
 }
 
 // IssueCode は指定した subject/email/clientID/nonce に紐づく Authorization Code を直接生成する。
@@ -229,7 +260,7 @@ func (m *MockIdP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, callbackURL.String(), http.StatusFound)
 }
 
-// handleToken は Authorization Code を受け取り、ID Token を発行する。
+// handleToken は Authorization Code または Refresh Token を受け取り、ID Token を発行する。
 func (m *MockIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -240,6 +271,15 @@ func (m *MockIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	grantType := r.FormValue("grant_type")
+
+	// refresh_token grant の処理
+	if grantType == "refresh_token" {
+		m.handleRefreshToken(w, r)
+		return
+	}
+
+	// authorization_code grant の処理（デフォルト）
 	code := r.FormValue("code")
 
 	m.mu.Lock()
@@ -295,6 +335,71 @@ func (m *MockIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 		"token_type":   "Bearer",
 		"id_token":     idToken,
 		"expires_in":   3600,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleRefreshToken は refresh_token grant を処理する。
+// IssueRefreshToken で生成したトークンを消費して新しい id_token と refresh_token を返す。
+func (m *MockIdP) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
+	refreshToken := r.FormValue("refresh_token")
+
+	m.mu.Lock()
+	entry, ok := m.refreshTokens[refreshToken]
+	if ok {
+		// refresh_token は使い捨て（rotation）: 消費して新しいトークンを生成
+		delete(m.refreshTokens, refreshToken)
+	}
+	m.mu.Unlock()
+
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error":             "invalid_grant",
+			"error_description": "refresh_token not found or expired",
+		})
+		return
+	}
+
+	// 新しい id_token を発行
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"iss":   m.Issuer(),
+		"sub":   entry.subject,
+		"aud":   jwt.ClaimStrings{entry.clientID},
+		"email": entry.email,
+		"iat":   now.Unix(),
+		"exp":   now.Add(time.Hour).Unix(),
+	}
+
+	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	tok.Header["kid"] = m.keyID
+
+	idToken, err := tok.SignedString(m.privateKey)
+	if err != nil {
+		http.Error(w, "failed to sign token", http.StatusInternalServerError)
+		return
+	}
+
+	// 新しい refresh_token を発行（rotation）
+	newRefreshTokenBytes := make([]byte, 16)
+	_, _ = rand.Read(newRefreshTokenBytes)
+	newRefreshToken := hex.EncodeToString(newRefreshTokenBytes)
+
+	m.mu.Lock()
+	m.refreshTokens[newRefreshToken] = entry
+	m.mu.Unlock()
+
+	// opaque access token
+	accessTokenBytes := make([]byte, 16)
+	_, _ = rand.Read(accessTokenBytes)
+	accessToken := hex.EncodeToString(accessTokenBytes)
+
+	resp := map[string]any{
+		"access_token":  accessToken,
+		"token_type":    "Bearer",
+		"id_token":      idToken,
+		"refresh_token": newRefreshToken,
+		"expires_in":    3600,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

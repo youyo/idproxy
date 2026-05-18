@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/youyo/idproxy/testutil"
 )
 
 // --- OAuthServer テスト用ヘルパー ---
@@ -3473,4 +3474,258 @@ func TestRefreshToken_IDPRefreshToken_Propagated(t *testing.T) {
 	if rtData.IDPRefreshToken != "idp-refresh-token-abc123" {
 		t.Errorf("IDPRefreshToken = %q, want %q", rtData.IDPRefreshToken, "idp-refresh-token-abc123")
 	}
+}
+
+// TestRefreshToken_IDPRefresh_WithRealPM は pm != nil && IDPRefreshToken != "" の場合に
+// IdP refresh_token を使って新しい id_token が取得・保存されることを確認する。
+// MockIdP の refresh_token grant サポートを使用して核心ロジックを検証する。
+func TestRefreshToken_IDPRefresh_WithRealPM(t *testing.T) {
+	// MockIdP を起動
+	idp := testutil.NewMockIdP(t)
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	st := newTestMemoryStore()
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{
+				Issuer:       idp.Issuer(),
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		Store:        st,
+		StoreIDToken: true,
+		OAuth: &OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "test-oauth-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	// ProviderManager を構築
+	ctx := context.Background()
+	pm, err := NewProviderManager(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewProviderManager: %v", err)
+	}
+
+	// pm を渡して OAuthServer を構築（核心部分のテスト）
+	srv, err := NewOAuthServer(cfg, st, nil, pm)
+	if err != nil {
+		t.Fatalf("NewOAuthServer: %v", err)
+	}
+
+	// MockIdP で IdP refresh_token を発行
+	idpRefreshToken := idp.IssueRefreshToken("sub-refresh-test", "refresh@example.com", "test-client-id")
+
+	// authorization_code データを直接 Store に保存（IdP refresh_token 付き）
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	codeChallenge := S256Challenge(codeVerifier)
+	code := "test-code-with-real-idp-refresh"
+
+	authCodeData := &AuthCodeData{
+		Code:                code,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User:                &User{Email: "refresh@example.com", Subject: "sub-refresh-test", Issuer: idp.Issuer()},
+		CreatedAt:           time.Now(),
+		ExpiresAt:           time.Now().Add(5 * time.Minute),
+		IDToken:             "original-id-token",
+		IDPRefreshToken:     idpRefreshToken,
+	}
+	if err := st.SetAuthCode(ctx, code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	// 1回目: authorization_code で access_token + refresh_token を取得
+	form1 := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"http://localhost:3000/callback"},
+		"client_id":     {"test-oauth-client"},
+		"code_verifier": {codeVerifier},
+	}
+	req1 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form1.Encode()))
+	req1.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("authorization_code token: expected 200, got %d; body: %s", w1.Code, w1.Body.String())
+	}
+
+	var resp1 map[string]any
+	if err := json.NewDecoder(w1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	refreshToken1 := resp1["refresh_token"].(string)
+
+	// RefreshTokenData に IDPRefreshToken が保存されているか確認
+	rtData1, err := st.GetRefreshToken(ctx, refreshToken1)
+	if err != nil {
+		t.Fatalf("GetRefreshToken: %v", err)
+	}
+	if rtData1 == nil {
+		t.Fatal("refresh token not in store")
+	}
+	if rtData1.IDPRefreshToken != idpRefreshToken {
+		t.Errorf("RefreshTokenData.IDPRefreshToken = %q, want %q", rtData1.IDPRefreshToken, idpRefreshToken)
+	}
+	originalIDToken := rtData1.IDToken
+	if originalIDToken != "original-id-token" {
+		t.Errorf("initial IDToken = %q, want %q", originalIDToken, "original-id-token")
+	}
+
+	// 2回目: refresh_token グラントで rotation（pm != nil && IDPRefreshToken != "" のパス）
+	form2 := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken1},
+		"client_id":     {"test-oauth-client"},
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("refresh_token grant: expected 200, got %d; body: %s", w2.Code, w2.Body.String())
+	}
+
+	var resp2 map[string]any
+	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+
+	// 新 access_token の AccessTokenData.IDToken が更新されていること（原来の old-id-token ではない）
+	newAccessToken := resp2["access_token"].(string)
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	tok, _, err := parser.ParseUnverified(newAccessToken, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("parse new access token: %v", err)
+	}
+	jti := tok.Claims.(jwt.MapClaims)["jti"].(string)
+	tokenData, err := st.GetAccessToken(ctx, jti)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tokenData == nil {
+		t.Fatal("new access token not in store")
+	}
+
+	// IdP refresh で新しい id_token が取得されていること（原来の "original-id-token" とは異なる JWT）
+	if tokenData.IDToken == "" {
+		t.Error("IDToken should not be empty after IdP refresh")
+	}
+	if tokenData.IDToken == "original-id-token" {
+		t.Error("IDToken should be updated by IdP refresh, not the original value")
+	}
+
+	// 新 RefreshTokenData に更新された IDPRefreshToken が保存されていること
+	refreshToken2 := resp2["refresh_token"].(string)
+	rtData2, err := st.GetRefreshToken(ctx, refreshToken2)
+	if err != nil {
+		t.Fatalf("GetRefreshToken (new): %v", err)
+	}
+	if rtData2 == nil {
+		t.Fatal("new refresh token not in store")
+	}
+	// MockIdP は rotation するため新しい IDPRefreshToken になっているはず
+	if rtData2.IDPRefreshToken == "" {
+		t.Error("new IDPRefreshToken should not be empty after IdP refresh rotation")
+	}
+	if rtData2.IDPRefreshToken == idpRefreshToken {
+		t.Error("IDPRefreshToken should be rotated (changed), but it's the same as original")
+	}
+}
+
+// TestRefreshToken_IDPRefresh_Failure_ReturnsInvalidGrant は IdP refresh が失敗した場合に
+// invalid_grant エラーが返されることを確認する（再認証強制）。
+func TestRefreshToken_IDPRefresh_Failure_ReturnsInvalidGrant(t *testing.T) {
+	idp := testutil.NewMockIdP(t)
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	st := newTestMemoryStore()
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{
+				Issuer:       idp.Issuer(),
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		Store:        st,
+		StoreIDToken: true,
+		OAuth: &OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "test-oauth-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	ctx := context.Background()
+	pm, err := NewProviderManager(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewProviderManager: %v", err)
+	}
+
+	srv, err := NewOAuthServer(cfg, st, nil, pm)
+	if err != nil {
+		t.Fatalf("NewOAuthServer: %v", err)
+	}
+
+	// RefreshTokenData を直接 Store に保存
+	// IDPRefreshToken に無効なトークン（MockIdP には登録されていない）を設定
+	now := time.Now()
+	rtData := &RefreshTokenData{
+		ID:              "test-refresh-token-failure",
+		FamilyID:        "test-family-id",
+		ClientID:        "test-oauth-client",
+		Subject:         "sub-test",
+		OIDCIssuer:      idp.Issuer(),
+		Email:           "test@example.com",
+		Scopes:          []string{"openid"},
+		IssuedAt:        now,
+		ExpiresAt:       now.Add(30 * 24 * time.Hour),
+		IDToken:         "old-id-token",
+		IDPRefreshToken: "invalid-idp-refresh-token-not-in-mock",
+	}
+	if err := st.SetRefreshToken(ctx, rtData.ID, rtData, 30*24*time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken: %v", err)
+	}
+
+	// refresh_token グラントで呼び出す（IdP refresh が失敗するはず）
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {"test-refresh-token-failure"},
+		"client_id":     {"test-oauth-client"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	// IdP refresh 失敗 → invalid_grant で再認証を強制
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 (invalid_grant), got %d; body: %s", w.Code, w.Body.String())
+	}
+	assertErrorResponse(t, w, "invalid_grant")
 }
