@@ -1512,7 +1512,7 @@ func setupOAuthServerForT14(t *testing.T, st idproxy.Store) (*idproxy.OAuthServe
 		t.Fatalf("Config.Validate(): %v", err)
 	}
 
-	srv, err := idproxy.NewOAuthServer(cfg, st, nil)
+	srv, err := idproxy.NewOAuthServer(cfg, st, nil, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer(): %v", err)
 	}
