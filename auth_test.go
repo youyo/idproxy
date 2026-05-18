@@ -309,7 +309,7 @@ func TestWrap_SessionCookie_Valid(t *testing.T) {
 		Subject: "sub-123",
 		Issuer:  "https://accounts.google.com",
 	}
-	sess, err := a.sessionManager.IssueSession(ctx, user, user.Issuer, "fake-id-token")
+	sess, err := a.sessionManager.IssueSession(ctx, user, user.Issuer, "fake-id-token", "")
 	if err != nil {
 		t.Fatalf("IssueSession() failed: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestWrap_SessionCookie_Expired(t *testing.T) {
 	// セッションを発行してすぐ削除（期限切れシミュレーション）
 	ctx := context.Background()
 	user := &User{Email: "test@example.com"}
-	sess, err := a.sessionManager.IssueSession(ctx, user, "https://example.com", "token")
+	sess, err := a.sessionManager.IssueSession(ctx, user, "https://example.com", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession() failed: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestWrap_PassesRequestUnmodified(t *testing.T) {
 
 	ctx := context.Background()
 	user := &User{Email: "test@example.com", Subject: "sub-1"}
-	sess, _ := a.sessionManager.IssueSession(ctx, user, "https://example.com", "tok")
+	sess, _ := a.sessionManager.IssueSession(ctx, user, "https://example.com", "tok", "")
 	cookieRec := httptest.NewRecorder()
 	_ = a.sessionManager.SetCookie(cookieRec, sess.ID)
 	cookieHeader := cookieRec.Header().Get("Set-Cookie")
@@ -749,7 +749,7 @@ func TestWrap_StoreIDToken_True(t *testing.T) {
 		Claims:  map[string]interface{}{"email": "test@example.com"},
 	}
 	rawIDToken := "eyJhbGciOiJSUzI1NiJ9.test-id-token"
-	sess, err := a.sessionManager.IssueSession(ctx, user, "https://accounts.google.com", rawIDToken)
+	sess, err := a.sessionManager.IssueSession(ctx, user, "https://accounts.google.com", rawIDToken, "")
 	if err != nil {
 		t.Fatalf("IssueSession() failed: %v", err)
 	}
@@ -794,7 +794,7 @@ func TestWrap_StoreIDToken_False(t *testing.T) {
 
 	ctx := context.Background()
 	user := &User{Email: "test@example.com", Subject: "sub-123"}
-	sess, err := a.sessionManager.IssueSession(ctx, user, "https://accounts.google.com", "some-id-token")
+	sess, err := a.sessionManager.IssueSession(ctx, user, "https://accounts.google.com", "some-id-token", "")
 	if err != nil {
 		t.Fatalf("IssueSession() failed: %v", err)
 	}

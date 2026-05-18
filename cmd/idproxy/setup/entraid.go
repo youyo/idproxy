@@ -175,6 +175,32 @@ func (c *AZClient) SetRedirectURIs(ctx context.Context, appID string, uris []str
 	return nil
 }
 
+// AddRequiredPermissions は Entra ID アプリに OIDC で必要な Microsoft Graph の
+// delegated permission（openid / email / profile / offline_access）を追加する。
+// 既に存在する場合は no-op（az は冪等）。
+// offline_access を含めることで IdP が refresh_token を返すようになる。
+func (c *AZClient) AddRequiredPermissions(ctx context.Context, appID string) error {
+	// Microsoft Graph (00000003-0000-0000-c000-000000000000) のスコープ:
+	//   openid        : 37f7f235-527c-4136-accd-4a02d197296e
+	//   email         : 64a6cdd6-aab1-4aaf-94b8-3cc8405e90d6
+	//   profile       : 14dad69e-099b-42c9-810b-d002981feec1
+	//   offline_access: 7427e0e9-2fba-42fe-b0c0-848c9e6a8182
+	args := []string{
+		"ad", "app", "permission", "add",
+		"--id", appID,
+		"--api", "00000003-0000-0000-c000-000000000000",
+		"--api-permissions",
+		"37f7f235-527c-4136-accd-4a02d197296e=Scope",
+		"64a6cdd6-aab1-4aaf-94b8-3cc8405e90d6=Scope",
+		"14dad69e-099b-42c9-810b-d002981feec1=Scope",
+		"7427e0e9-2fba-42fe-b0c0-848c9e6a8182=Scope",
+	}
+	if _, err := c.Exec.Output(ctx, "az", args); err != nil {
+		return fmt.Errorf("az ad app permission add (required permissions): %w", err)
+	}
+	return nil
+}
+
 // oDataEscapeSingleQuote は OData フィルタ文字列のシングルクオートをエスケープする。
 // OData の慣例: シングルクオートは '' に置換する。
 func oDataEscapeSingleQuote(s string) string {

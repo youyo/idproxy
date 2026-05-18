@@ -190,7 +190,8 @@ var DefaultConfig = Config{
 }
 
 // DefaultScopes は OIDCProvider のデフォルトスコープ。
-var DefaultScopes = []string{"openid", "email", "profile"}
+// offline_access を含むことで IdP が refresh_token を返すようになる（IdP refresh_token 保存に必要）。
+var DefaultScopes = []string{"openid", "email", "profile", "offline_access"}
 
 // Validate は Config のバリデーションを行い、デフォルト値を適用する。
 // 使用前に必ず呼び出すこと。

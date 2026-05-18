@@ -288,7 +288,7 @@ func TestIssueSession_CreatesSession(t *testing.T) {
 	ctx := context.Background()
 	user := newTestUser()
 
-	sess, err := sm.IssueSession(ctx, user, "https://issuer.example.com", "raw-id-token")
+	sess, err := sm.IssueSession(ctx, user, "https://issuer.example.com", "raw-id-token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestIssueSession_ExpiresAt(t *testing.T) {
 	ctx := context.Background()
 
 	before := time.Now()
-	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
 	after := time.Now()
 
 	if err != nil {
@@ -346,7 +346,7 @@ func TestIssueSession_IDIsUUID(t *testing.T) {
 	sm, _ := newTestSessionManager(t)
 	ctx := context.Background()
 
-	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestSetCookie_SetsCookieHeader(t *testing.T) {
 	sm, _ := newTestSessionManager(t)
 	ctx := context.Background()
 
-	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestSetCookie_SecureAttribute(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestSetCookie_HttpOnlyAttribute(t *testing.T) {
 	sm, _ := newTestSessionManager(t)
 	ctx := context.Background()
 
-	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestSetCookie_SameSiteLax(t *testing.T) {
 	sm, _ := newTestSessionManager(t)
 	ctx := context.Background()
 
-	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestGetSessionFromRequest_Valid(t *testing.T) {
 	ctx := context.Background()
 	user := newTestUser()
 
-	sess, err := sm.IssueSession(ctx, user, "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, user, "https://issuer", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestGetSessionFromRequest_StoreSessionDeleted(t *testing.T) {
 	ctx := context.Background()
 
 	// セッションを発行
-	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -594,7 +594,7 @@ func TestDeleteSession_DeletesSessionAndCookie(t *testing.T) {
 	ctx := context.Background()
 
 	// セッション発行
-	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token")
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -649,6 +649,49 @@ func TestDeleteSession_NoCookie_Idempotent(t *testing.T) {
 	// Cookie がなくてもエラーにならない
 	if err := sm.DeleteSession(ctx, w, r); err != nil {
 		t.Fatalf("want nil error for no cookie, got %v", err)
+	}
+}
+
+// --- T_IDPRefreshToken: IssueSession_IDPRefreshToken保存 ---
+
+func TestIssueSession_IDPRefreshToken(t *testing.T) {
+	sm, s := newTestSessionManager(t)
+	ctx := context.Background()
+	user := newTestUser()
+
+	// idpRefreshToken を渡すと Session.IDPRefreshToken に保存されること
+	sess, err := sm.IssueSession(ctx, user, "https://issuer.example.com", "raw-id-token", "idp-refresh-token-xyz")
+	if err != nil {
+		t.Fatalf("IssueSession: %v", err)
+	}
+	if sess.IDPRefreshToken != "idp-refresh-token-xyz" {
+		t.Errorf("want IDPRefreshToken %q, got %q", "idp-refresh-token-xyz", sess.IDPRefreshToken)
+	}
+
+	// Store に保存されたセッションにも IDPRefreshToken が含まれること
+	stored, err := s.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("session not found in store")
+	}
+	if stored.IDPRefreshToken != "idp-refresh-token-xyz" {
+		t.Errorf("stored IDPRefreshToken = %q, want %q", stored.IDPRefreshToken, "idp-refresh-token-xyz")
+	}
+}
+
+func TestIssueSession_IDPRefreshToken_Empty(t *testing.T) {
+	sm, _ := newTestSessionManager(t)
+	ctx := context.Background()
+
+	// idpRefreshToken が空文字列でも正常に動作すること（後方互換）
+	sess, err := sm.IssueSession(ctx, newTestUser(), "https://issuer", "token", "")
+	if err != nil {
+		t.Fatalf("IssueSession: %v", err)
+	}
+	if sess.IDPRefreshToken != "" {
+		t.Errorf("want empty IDPRefreshToken, got %q", sess.IDPRefreshToken)
 	}
 }
 

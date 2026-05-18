@@ -62,16 +62,19 @@ func NewSessionManager(cfg Config) (*SessionManager, error) {
 
 // IssueSession は新しいセッションを発行し、Store に保存して返す。
 // セッション ID は UUID v4 で生成する。
-func (sm *SessionManager) IssueSession(ctx context.Context, user *User, providerIssuer, idToken string) (*Session, error) {
+// idpRefreshToken は IdP が発行した refresh_token（offline_access スコープ取得時）。
+// 取得できない場合（スコープ未設定等）は空文字列を渡す。
+func (sm *SessionManager) IssueSession(ctx context.Context, user *User, providerIssuer, idToken, idpRefreshToken string) (*Session, error) {
 	id := uuid.New().String()
 	now := time.Now()
 	sess := &Session{
-		ID:             id,
-		User:           user,
-		ProviderIssuer: providerIssuer,
-		IDToken:        idToken,
-		CreatedAt:      now,
-		ExpiresAt:      now.Add(sm.maxAge),
+		ID:              id,
+		User:            user,
+		ProviderIssuer:  providerIssuer,
+		IDToken:         idToken,
+		IDPRefreshToken: idpRefreshToken,
+		CreatedAt:       now,
+		ExpiresAt:       now.Add(sm.maxAge),
 	}
 	if err := sm.store.SetSession(ctx, id, sess, sm.maxAge); err != nil {
 		return nil, fmt.Errorf("idproxy: failed to store session: %w", err)

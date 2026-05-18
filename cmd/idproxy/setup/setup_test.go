@@ -387,6 +387,54 @@ func TestAZClient_GetTenantID(t *testing.T) {
 	}
 }
 
+func TestAZClient_AddRequiredPermissions_success(t *testing.T) {
+	stub := &StubExecutor{
+		Responses: map[string]StubResponse{
+			"az ad app permission add": {Out: []byte("")},
+		},
+	}
+	c := NewAZClient(stub)
+	err := c.AddRequiredPermissions(context.Background(), "my-app-id")
+	if err != nil {
+		t.Fatalf("AddRequiredPermissions error: %v", err)
+	}
+	if len(stub.Calls) != 1 {
+		t.Fatalf("Calls len = %d, want 1", len(stub.Calls))
+	}
+	call := stub.Calls[0]
+	joined := strings.Join(call.Args, " ")
+	// 全4スコープが含まれていること
+	for _, want := range []string{
+		"ad app permission add",
+		"--id my-app-id",
+		"--api 00000003-0000-0000-c000-000000000000",
+		"37f7f235-527c-4136-accd-4a02d197296e=Scope",  // openid
+		"64a6cdd6-aab1-4aaf-94b8-3cc8405e90d6=Scope",  // email
+		"14dad69e-099b-42c9-810b-d002981feec1=Scope",  // profile
+		"7427e0e9-2fba-42fe-b0c0-848c9e6a8182=Scope",  // offline_access
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q (got %q)", want, joined)
+		}
+	}
+}
+
+func TestAZClient_AddRequiredPermissions_error(t *testing.T) {
+	stub := &StubExecutor{
+		Responses: map[string]StubResponse{
+			"az ad app permission add": {Out: nil, Err: fmt.Errorf("permission denied")},
+		},
+	}
+	c := NewAZClient(stub)
+	err := c.AddRequiredPermissions(context.Background(), "my-app-id")
+	if err == nil {
+		t.Fatal("AddRequiredPermissions should return error on failure")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("error should contain 'permission denied', got: %v", err)
+	}
+}
+
 // Run (Orchestration) --------------------------------------------------------
 
 func TestRun_CreatesNewApp(t *testing.T) {

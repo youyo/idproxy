@@ -58,7 +58,7 @@ func setupOAuthServer(t *testing.T, externalURL, pathPrefix string, opts ...func
 		t.Fatalf("Config.Validate() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, nil)
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestNewOAuthServer_WithOAuthConfigSigningKey(t *testing.T) {
 		t.Fatalf("Config.Validate() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, nil)
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestNewOAuthServer_NilOAuthConfig(t *testing.T) {
 		t.Fatalf("Config.Validate() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, nil)
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() should succeed even without OAuth config (auto-generate key): %v", err)
 	}
@@ -175,7 +175,7 @@ func TestNewOAuthServer_NonECDSAKey(t *testing.T) {
 		t.Fatalf("Config.Validate() failed: %v", err)
 	}
 
-	_, err = NewOAuthServer(cfg, st, nil)
+	_, err = NewOAuthServer(cfg, st, nil, nil)
 	if err == nil {
 		t.Fatal("NewOAuthServer() should return error for non P-256 ECDSA key")
 	}
@@ -454,7 +454,7 @@ func setupAuthorizeServer(t *testing.T) (*OAuthServer, *SessionManager, *testMem
 		t.Fatalf("NewSessionManager() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, sm)
+	srv, err := NewOAuthServer(cfg, st, sm, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -472,7 +472,7 @@ func issueTestSession(t *testing.T, sm *SessionManager) []*http.Cookie {
 		Subject: "sub-123",
 		Issuer:  "https://accounts.google.com",
 	}
-	sess, err := sm.IssueSession(ctx, user, "https://accounts.google.com", "raw-id-token")
+	sess, err := sm.IssueSession(ctx, user, "https://accounts.google.com", "raw-id-token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -831,7 +831,7 @@ func TestAuthorize_ExpiredSessionRedirectsToLogin(t *testing.T) {
 		Subject: "sub-123",
 		Issuer:  "https://accounts.google.com",
 	}
-	sess, err := sm.IssueSession(ctx, user, "https://accounts.google.com", "raw-id-token")
+	sess, err := sm.IssueSession(ctx, user, "https://accounts.google.com", "raw-id-token", "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -897,7 +897,7 @@ func TestAuthorize_WithPathPrefix(t *testing.T) {
 		t.Fatalf("NewSessionManager() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, sm)
+	srv, err := NewOAuthServer(cfg, st, sm, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -954,7 +954,7 @@ func TestAuthorize_AllowedRedirectURIs_Localhost(t *testing.T) {
 		t.Fatalf("NewSessionManager() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, sm)
+	srv, err := NewOAuthServer(cfg, st, sm, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -1455,7 +1455,7 @@ func TestToken_WithPathPrefix(t *testing.T) {
 		t.Fatalf("Config.Validate() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, nil)
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -1599,7 +1599,7 @@ func TestRegister_StoresPersistsClient(t *testing.T) {
 		t.Fatalf("Config.Validate() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, nil)
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -1849,7 +1849,7 @@ func TestAuthorize_DynamicClient(t *testing.T) {
 		t.Fatalf("NewSessionManager: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, sm)
+	srv, err := NewOAuthServer(cfg, st, sm, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -2161,7 +2161,7 @@ func setupTokenServerWithCapturedLogger(t *testing.T, logger *slog.Logger) (*OAu
 		t.Fatalf("NewSessionManager() failed: %v", err)
 	}
 
-	srv, err := NewOAuthServer(cfg, st, sm)
+	srv, err := NewOAuthServer(cfg, st, sm, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer() failed: %v", err)
 	}
@@ -2499,7 +2499,7 @@ func TestToken_RefreshGrant_Expired(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Config.Validate(): %v", err)
 	}
-	srv, err := NewOAuthServer(cfg, st, nil)
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer(): %v", err)
 	}
@@ -2696,7 +2696,7 @@ func TestToken_AccessTokenTTL_FromConfig(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Config.Validate(): %v", err)
 	}
-	srv, err := NewOAuthServer(cfg, st, nil)
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer(): %v", err)
 	}
@@ -2817,7 +2817,7 @@ func TestAuthorize_StoreIDToken_PropagatesToAuthCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionManager: %v", err)
 	}
-	srv, err := NewOAuthServer(cfg, st, sm)
+	srv, err := NewOAuthServer(cfg, st, sm, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer: %v", err)
 	}
@@ -2825,7 +2825,7 @@ func TestAuthorize_StoreIDToken_PropagatesToAuthCode(t *testing.T) {
 	// rawIDToken を持つセッションを発行
 	rawIDToken := "eyJhbGciOiJSUzI1NiJ9.store-idtoken-test"
 	user := &User{Email: "user@example.com", Subject: "sub-store-idtoken", Issuer: "https://accounts.google.com"}
-	sess, err := sm.IssueSession(context.Background(), user, "https://accounts.google.com", rawIDToken)
+	sess, err := sm.IssueSession(context.Background(), user, "https://accounts.google.com", rawIDToken, "")
 	if err != nil {
 		t.Fatalf("IssueSession: %v", err)
 	}
@@ -3050,7 +3050,7 @@ func setupTokenServerWithIDToken(t *testing.T, rawIDToken string) (*OAuthServer,
 	if err != nil {
 		t.Fatalf("NewSessionManager: %v", err)
 	}
-	srv, err := NewOAuthServer(cfg, st, sm)
+	srv, err := NewOAuthServer(cfg, st, sm, nil)
 	if err != nil {
 		t.Fatalf("NewOAuthServer: %v", err)
 	}
@@ -3260,5 +3260,217 @@ func TestOAuthServer_RedirectToLogin_NoValidator_Returns302(t *testing.T) {
 	loc := rec.Header().Get("Location")
 	if !strings.HasPrefix(loc, "/login?redirect_to=") {
 		t.Errorf("Location should start with /login?redirect_to=, got %q", loc)
+	}
+}
+
+// --- IdP refresh テスト: pm=nil 時は旧来動作（IDToken を引き継ぐ） ---
+
+func TestRefreshToken_IDPRefreshToken_NilPM_FallsbackToOldIDToken(t *testing.T) {
+	// pm=nil の場合: IDPRefreshToken があっても旧来の IDToken 引き継ぎになる。
+	// (IDPRefreshToken != "" && pm == nil の場合は IDPRefreshToken がない扱い→ IDToken を引き継ぐ)
+	// 実際には IDPRefreshToken != "" && pm == nil のパスは存在しないが、
+	// pm == nil 時は全体として IDToken を引き継ぐことを検証する。
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	st := newTestMemoryStore()
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{Issuer: "https://accounts.google.com", ClientID: "test-client-id", ClientSecret: "test-client-secret"},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		Store:        st,
+		StoreIDToken: true,
+		OAuth: &OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "test-oauth-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	// pm=nil で OAuthServer を構築
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
+	if err != nil {
+		t.Fatalf("NewOAuthServer: %v", err)
+	}
+
+	ctx := context.Background()
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	codeChallenge := S256Challenge(codeVerifier)
+
+	// authorization_code を直接 Store に置く（IDPRefreshToken は空）
+	code := "test-code-no-idp-refresh"
+	authCodeData := &AuthCodeData{
+		Code:                code,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User:                &User{Email: "u@example.com", Subject: "sub-123", Issuer: "https://accounts.google.com"},
+		CreatedAt:           time.Now(),
+		ExpiresAt:           time.Now().Add(5 * time.Minute),
+		IDToken:             "old-id-token",
+		IDPRefreshToken:     "", // 旧セッション互換（IDPRefreshToken なし）
+	}
+	if err := st.SetAuthCode(ctx, code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	// 1回目: authorization_code で access_token + refresh_token を取得
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"http://localhost:3000/callback"},
+		"client_id":     {"test-oauth-client"},
+		"code_verifier": {codeVerifier},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first token: expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp1 map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	refreshToken1 := resp1["refresh_token"].(string)
+
+	// 2回目: refresh_token で rotation（pm=nil なので旧来動作: old-id-token を引き継ぐ）
+	form2 := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken1},
+		"client_id":     {"test-oauth-client"},
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second token (refresh): expected 200, got %d; body: %s", w2.Code, w2.Body.String())
+	}
+
+	var resp2 map[string]any
+	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+
+	// 新 access_token の jti から IDToken を確認
+	newAccessToken := resp2["access_token"].(string)
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	tok, _, err := parser.ParseUnverified(newAccessToken, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("parse new access token: %v", err)
+	}
+	jti := tok.Claims.(jwt.MapClaims)["jti"].(string)
+	tokenData, err := st.GetAccessToken(ctx, jti)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tokenData == nil {
+		t.Fatal("new access token not in store")
+	}
+	// pm=nil && IDPRefreshToken="" → 旧来動作で old-id-token を引き継ぐ
+	if tokenData.IDToken != "old-id-token" {
+		t.Errorf("IDToken = %q, want %q (fallback to old IDToken when pm=nil)", tokenData.IDToken, "old-id-token")
+	}
+}
+
+// TestRefreshToken_IDPRefreshToken_Propagated は authorization_code → refresh_token 経路で
+// IDPRefreshToken が RefreshTokenData に保存されることを確認する。
+func TestRefreshToken_IDPRefreshToken_Propagated(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	st := newTestMemoryStore()
+	cfg := Config{
+		Providers: []OIDCProvider{
+			{Issuer: "https://accounts.google.com", ClientID: "test-client-id", ClientSecret: "test-client-secret"},
+		},
+		ExternalURL:  "http://localhost:8080",
+		CookieSecret: bytes.Repeat([]byte("a"), 32),
+		Store:        st,
+		StoreIDToken: true,
+		OAuth: &OAuthConfig{
+			SigningKey:          privateKey,
+			ClientID:            "test-oauth-client",
+			AllowedRedirectURIs: []string{"http://localhost:3000/callback"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	srv, err := NewOAuthServer(cfg, st, nil, nil)
+	if err != nil {
+		t.Fatalf("NewOAuthServer: %v", err)
+	}
+
+	ctx := context.Background()
+	codeVerifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	codeChallenge := S256Challenge(codeVerifier)
+
+	// IDPRefreshToken が設定された authorization_code を用意
+	code := "test-code-with-idp-refresh"
+	authCodeData := &AuthCodeData{
+		Code:                code,
+		ClientID:            "test-oauth-client",
+		RedirectURI:         "http://localhost:3000/callback",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Scopes:              []string{"openid"},
+		User:                &User{Email: "u@example.com", Subject: "sub-123", Issuer: "https://accounts.google.com"},
+		CreatedAt:           time.Now(),
+		ExpiresAt:           time.Now().Add(5 * time.Minute),
+		IDToken:             "some-id-token",
+		IDPRefreshToken:     "idp-refresh-token-abc123",
+	}
+	if err := st.SetAuthCode(ctx, code, authCodeData, 5*time.Minute); err != nil {
+		t.Fatalf("SetAuthCode: %v", err)
+	}
+
+	// authorization_code グラントで token を取得
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"http://localhost:3000/callback"},
+		"client_id":     {"test-oauth-client"},
+		"code_verifier": {codeVerifier},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token: expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	refreshTokenID := resp["refresh_token"].(string)
+
+	// RefreshTokenData に IDPRefreshToken が保存されているか確認
+	rtData, err := st.GetRefreshToken(ctx, refreshTokenID)
+	if err != nil {
+		t.Fatalf("GetRefreshToken: %v", err)
+	}
+	if rtData == nil {
+		t.Fatal("refresh token not in store")
+	}
+	if rtData.IDPRefreshToken != "idp-refresh-token-abc123" {
+		t.Errorf("IDPRefreshToken = %q, want %q", rtData.IDPRefreshToken, "idp-refresh-token-abc123")
 	}
 }

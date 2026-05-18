@@ -58,9 +58,10 @@ func New(ctx context.Context, cfg Config) (*Auth, error) {
 	}
 
 	// OAuth 設定がある場合は OAuthServer を初期化
+	// pm を渡すことで refresh_token rotation 時に IdP refresh_token を使って id_token を更新できる。
 	var oauthServer http.Handler
 	if cfg.OAuth != nil {
-		srv, err3 := NewOAuthServer(cfg, store, sm)
+		srv, err3 := NewOAuthServer(cfg, store, sm, pm)
 		if err3 != nil {
 			return nil, err3
 		}

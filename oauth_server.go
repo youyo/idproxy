@@ -18,6 +18,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"golang.org/x/oauth2"
 )
 
 // OAuthServer は OAuth 2.1 Authorization Server エンドポイントを提供する。
@@ -31,6 +32,9 @@ type OAuthServer struct {
 	keyID string
 	// sessionManager はセッション管理（/authorize でユーザー認証確認に使用）。
 	sessionManager *SessionManager
+	// pm は IdP refresh_token を使って新しい id_token を取得するための ProviderManager。
+	// nil の場合は IdP refresh をスキップして旧来の動作（古い IDToken を引き継ぐ）になる。
+	pm *ProviderManager
 	// accessTokenTTL は Access Token の有効期間。
 	accessTokenTTL time.Duration
 	// refreshTokenTTL は Refresh Token の有効期間。
@@ -43,7 +47,9 @@ type OAuthServer struct {
 // Config.OAuth が設定されている場合はその SigningKey（ECDSA P-256）を使用する。
 // Config.OAuth が nil の場合は ES256 鍵ペアを自動生成する。
 // sm は SessionManager（/authorize でユーザー認証確認に使用）。nil の場合もエラーにはしない。
-func NewOAuthServer(cfg Config, store Store, sm *SessionManager) (*OAuthServer, error) {
+// pm は IdP refresh_token を使って id_token を更新するための ProviderManager。
+// nil の場合は IdP refresh をスキップして旧来の動作（古い IDToken を引き継ぐ）になる。
+func NewOAuthServer(cfg Config, store Store, sm *SessionManager, pm *ProviderManager) (*OAuthServer, error) {
 	var privateKey *ecdsa.PrivateKey
 
 	if cfg.OAuth != nil && cfg.OAuth.SigningKey != nil {
@@ -88,6 +94,7 @@ func NewOAuthServer(cfg Config, store Store, sm *SessionManager) (*OAuthServer, 
 		privateKey:      privateKey,
 		keyID:           keyID,
 		sessionManager:  sm,
+		pm:              pm,
 		accessTokenTTL:  accessTokenTTL,
 		refreshTokenTTL: refreshTokenTTL,
 		logger:          logger,
@@ -368,10 +375,14 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:           now.Add(ttl),
 		Used:                false,
 	}
-	// StoreIDToken が有効な場合、セッションの ID Token を認可コードに伝播する。
+	// StoreIDToken が有効な場合、セッションの ID Token と IdP refresh_token を認可コードに伝播する。
 	// authorization_code → access_token 経路で bearer 検証時に IDToken を復元するために使用。
+	// IDPRefreshToken は refresh_token rotation 時の IdP refresh で新しい id_token を取得するために必要。
 	if s.config.StoreIDToken && sess.IDToken != "" {
 		authCodeData.IDToken = sess.IDToken
+	}
+	if s.config.StoreIDToken && sess.IDPRefreshToken != "" {
+		authCodeData.IDPRefreshToken = sess.IDPRefreshToken
 	}
 
 	if err := s.store.SetAuthCode(r.Context(), code, authCodeData, ttl); err != nil {
@@ -517,7 +528,8 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// access_token + refresh_token を発行して応答（新 family）
-		s.issueTokenResponse(w, r, user, authCode.Scopes, clientID, "", authCode.IDToken)
+		// IDPRefreshToken も引き継ぐことで refresh_token rotation 時の IdP refresh が可能になる。
+		s.issueTokenResponse(w, r, user, authCode.Scopes, clientID, "", authCode.IDToken, authCode.IDPRefreshToken)
 
 	case "refresh_token":
 		refreshToken := r.PostFormValue("refresh_token")
@@ -585,10 +597,52 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		// StoreIDToken=true の場合のみ IDToken を引き継ぐ。
 		// false に切り替えた後は既存 family でも IDToken を伝播しない。
 		idTokenForRefresh := ""
+		idpRefreshTokenForRefresh := ""
+
 		if s.config.StoreIDToken {
-			idTokenForRefresh = data.IDToken
+			if data.IDPRefreshToken != "" && s.pm != nil {
+				// IdP refresh_token を使って新しい id_token を取得する（Entra ID の id_token 有効期限対策）。
+				oauth2Cfg, err := s.pm.OAuth2Config(data.OIDCIssuer)
+				if err != nil {
+					// OIDCIssuer が不明な場合（設定変更等）は再認証を強制する。
+					s.tokenError(w, "invalid_grant", "provider not found, re-authenticate required", http.StatusBadRequest)
+					return
+				}
+
+				// 既存の IdP refresh_token で新トークンを取得する。
+				// oauth2.TokenSource は grant_type=refresh_token を自動発行する。
+				ts := oauth2Cfg.TokenSource(ctx, &oauth2.Token{RefreshToken: data.IDPRefreshToken})
+				newToken, err := ts.Token()
+				if err != nil {
+					// IdP refresh 失敗（期限切れ、revoked 等）は再認証を強制する。
+					s.logger.Warn("IdP refresh_token rejected, forcing re-authentication",
+						"error", err.Error(), "user_sub", data.Subject)
+					s.tokenError(w, "invalid_grant", "IdP token refresh failed, re-authenticate required", http.StatusBadRequest)
+					return
+				}
+
+				// 新 id_token を取得する。
+				if rawIDToken, ok := newToken.Extra("id_token").(string); ok && rawIDToken != "" {
+					idTokenForRefresh = rawIDToken
+				} else {
+					// id_token が返らなかった場合（スコープ不足等）は警告のみ。
+					// AccessTokenData.IDToken は空になり、次回アクセスで再認証が必要になる。
+					s.logger.Warn("IdP refresh did not return id_token", "user_sub", data.Subject)
+				}
+
+				// 新 IdP refresh_token を保存する（Entra ID は毎回 rotate する）。
+				if newToken.RefreshToken != "" {
+					idpRefreshTokenForRefresh = newToken.RefreshToken
+				} else {
+					// refresh_token が返らない場合（一部 IdP）は既存を引き継ぐ。
+					idpRefreshTokenForRefresh = data.IDPRefreshToken
+				}
+			} else {
+				// IDPRefreshToken がない場合（旧セッション互換）は旧来の動作（古い IDToken を引き継ぐ）。
+				idTokenForRefresh = data.IDToken
+			}
 		}
-		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID, idTokenForRefresh)
+		s.issueTokenResponse(w, r, user, data.Scopes, data.ClientID, data.FamilyID, idTokenForRefresh, idpRefreshTokenForRefresh)
 
 	default:
 		s.tokenError(w, "unsupported_grant_type", "unsupported grant_type", http.StatusBadRequest)
@@ -599,8 +653,8 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 // familyID が空文字列の場合は新規生成する（authorization_code 経路）。
 // 非空の場合は既存を引き継ぐ（refresh_token 経路）。
 // idToken は authorization_code 経路で StoreIDToken=true のとき非空になる。
-// refresh_token 経路は "" を渡すこと。
-func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request, user *User, scopes []string, clientID string, familyID string, idToken string) {
+// idpRefreshToken は IdP が発行した refresh_token。取得できない場合は "" を渡す。
+func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request, user *User, scopes []string, clientID string, familyID string, idToken, idpRefreshToken string) {
 	ctx := r.Context()
 
 	// familyID が空なら新規生成
@@ -668,18 +722,19 @@ func (s *OAuthServer) issueTokenResponse(w http.ResponseWriter, r *http.Request,
 	refreshTokenID := base64.RawURLEncoding.EncodeToString(rtBytes)
 
 	rtData := &RefreshTokenData{
-		ID:         refreshTokenID,
-		FamilyID:   familyID,
-		ClientID:   clientID,
-		Subject:    sub,
-		OIDCIssuer: user.Issuer,
-		Email:      email,
-		Name:       name,
-		Scopes:     scopes,
-		IssuedAt:   now,
-		ExpiresAt:  now.Add(s.refreshTokenTTL),
-		Used:       false,
-		IDToken:    idToken,
+		ID:              refreshTokenID,
+		FamilyID:        familyID,
+		ClientID:        clientID,
+		Subject:         sub,
+		OIDCIssuer:      user.Issuer,
+		Email:           email,
+		Name:            name,
+		Scopes:          scopes,
+		IssuedAt:        now,
+		ExpiresAt:       now.Add(s.refreshTokenTTL),
+		Used:            false,
+		IDToken:         idToken,
+		IDPRefreshToken: idpRefreshToken,
 	}
 	if err := s.store.SetRefreshToken(ctx, refreshTokenID, rtData, s.refreshTokenTTL); err != nil {
 		s.tokenError(w, "server_error", "failed to store refresh token", http.StatusInternalServerError)

@@ -200,6 +200,12 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	// 必要な Microsoft Graph permission を追加する（offline_access 含む idp_refresh_token 取得に必要）。
+	// 既に存在する場合は冪等のため no-op。失敗しても警告のみで続行する。
+	if err := az.AddRequiredPermissions(ctx, app.AppID); err != nil {
+		_, _ = fmt.Fprintf(opts.Stderr, "warning: failed to add required permissions (%v); add manually if needed\n", err)
+	}
+
 	callback := CallbackURI(opts.ExternalURL, opts.PathPrefix)
 	existing, err := az.GetRedirectURIs(ctx, app.AppID)
 	if err != nil {

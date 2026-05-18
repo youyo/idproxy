@@ -328,8 +328,8 @@ func (ba *BrowserAuth) CallbackHandler() http.Handler {
 			Claims:  allClaims,
 		}
 
-		// セッションを発行
-		sess, err := ba.sm.IssueSession(ctx, user, issuer, rawIDToken)
+		// セッションを発行（IdP refresh_token を保存して rotation 時の id_token 更新に使用する）
+		sess, err := ba.sm.IssueSession(ctx, user, issuer, rawIDToken, token.RefreshToken)
 		if err != nil {
 			ba.logger.Error("failed to issue session", "error", err)
 			http.Error(w, "failed to create session", http.StatusInternalServerError)

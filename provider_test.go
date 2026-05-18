@@ -172,8 +172,8 @@ func TestProviderManager_OAuth2Config_Success(t *testing.T) {
 	if oc.RedirectURL != wantRedirect {
 		t.Errorf("RedirectURL = %s, want %s", oc.RedirectURL, wantRedirect)
 	}
-	// デフォルトスコープを確認
-	wantScopes := []string{"openid", "email", "profile"}
+	// デフォルトスコープを確認（offline_access を含む）
+	wantScopes := []string{"openid", "email", "profile", "offline_access"}
 	if len(oc.Scopes) != len(wantScopes) {
 		t.Fatalf("Scopes length = %d, want %d", len(oc.Scopes), len(wantScopes))
 	}
@@ -214,14 +214,14 @@ func TestProviderManager_Verifier_NotExists(t *testing.T) {
 	}
 }
 
-// T12: デフォルトスコープの適用
+// T12: デフォルトスコープの適用（offline_access を含む）
 func TestProviderManager_DefaultScopes(t *testing.T) {
 	pm, idp := setupSingleProvider(t)
 	oc, err := pm.OAuth2Config(idp.Issuer())
 	if err != nil {
 		t.Fatalf("OAuth2Config: %v", err)
 	}
-	wantScopes := []string{"openid", "email", "profile"}
+	wantScopes := []string{"openid", "email", "profile", "offline_access"}
 	if len(oc.Scopes) != len(wantScopes) {
 		t.Fatalf("Scopes length = %d, want %d", len(oc.Scopes), len(wantScopes))
 	}

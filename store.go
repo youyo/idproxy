@@ -63,6 +63,11 @@ type Session struct {
 	// セッション復元時の検証やクレーム参照に使用。
 	IDToken string
 
+	// IDPRefreshToken は IdP が発行した refresh_token。
+	// offline_access スコープ付きブラウザ認証時に保存される。
+	// OAuth 2.1 refresh_token rotation 時に新しい id_token を取得するために使用する。
+	IDPRefreshToken string
+
 	// CreatedAt はセッション作成日時。
 	CreatedAt time.Time
 
@@ -107,6 +112,11 @@ type AuthCodeData struct {
 	// authorization_code → access_token 発行時に AccessTokenData に伝播される。
 	// StoreIDToken = false（デフォルト）の場合は空文字列。
 	IDToken string
+
+	// IDPRefreshToken は IdP が発行した refresh_token。
+	// ブラウザ認証（OIDC コールバック）時に offline_access スコープ付きで取得した場合に保存される。
+	// authorization_code 経路で RefreshTokenData に伝播され、rotation 時に新しい id_token を取得するために使用する。
+	IDPRefreshToken string
 }
 
 // AccessTokenData はアクセストークンのメタデータを保持する。
@@ -190,6 +200,12 @@ type RefreshTokenData struct {
 	// refresh_token グラント時に新 AccessTokenData.IDToken に引き継がれる。
 	// StoreIDToken = false（デフォルト）の場合は空文字列。
 	IDToken string
+
+	// IDPRefreshToken は IdP が発行した refresh_token。
+	// authorization_code グラント時に AuthCodeData.IDPRefreshToken から引き継がれ、
+	// rotation 時に新しい id_token を取得するために使用する。
+	// 一部の IdP（Entra ID 等）は refresh_token を毎回 rotate するため、rotation 後の新しいトークンで上書きする。
+	IDPRefreshToken string
 }
 
 // ClientData は動的登録されたクライアントの情報を保持する（RFC 7591）。

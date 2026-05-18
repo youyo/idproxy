@@ -105,7 +105,8 @@ func TestDefaultConfigValues(t *testing.T) {
 }
 
 func TestDefaultScopes(t *testing.T) {
-	expected := []string{"openid", "email", "profile"}
+	// offline_access を含むことで IdP が refresh_token を返すようになる
+	expected := []string{"openid", "email", "profile", "offline_access"}
 	if len(DefaultScopes) != len(expected) {
 		t.Fatalf("DefaultScopes: got %d items, want %d", len(DefaultScopes), len(expected))
 	}
@@ -293,7 +294,8 @@ func TestValidate_DefaultScopes_Applied(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	expected := []string{"openid", "email", "profile"}
+	// offline_access を含むことで IdP が refresh_token を返すようになる
+	expected := []string{"openid", "email", "profile", "offline_access"}
 	if len(cfg.Providers[0].Scopes) != len(expected) {
 		t.Fatalf("Scopes: got %d, want %d", len(cfg.Providers[0].Scopes), len(expected))
 	}
