@@ -662,6 +662,7 @@ func TestAuthorize_MissingState(t *testing.T) {
 }
 
 func TestAuthorize_MissingScope(t *testing.T) {
+	// scope 未指定時は openid を自動補完して認証フローを継続する（未認証→ログインリダイレクト）
 	srv, _, _ := setupAuthorizeServer(t)
 	q := validAuthorizeQuery()
 	q.Del("scope")
@@ -670,13 +671,18 @@ func TestAuthorize_MissingScope(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	// 未認証なのでログインへリダイレクト（scope エラーにはならない）
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected %d (redirect to login), got %d body=%s", http.StatusFound, w.Code, w.Body.String())
 	}
-	assertErrorResponse(t, w, "invalid_scope")
+	location := w.Header().Get("Location")
+	if !strings.HasPrefix(location, "/login?redirect_to=") {
+		t.Errorf("expected redirect to /login, got %q", location)
+	}
 }
 
 func TestAuthorize_ScopeWithoutOpenID(t *testing.T) {
+	// openid なしの scope は自動補完して認証フローを継続する（未認証→ログインリダイレクト）
 	srv, _, _ := setupAuthorizeServer(t)
 	q := validAuthorizeQuery()
 	q.Set("scope", "email profile")
@@ -685,10 +691,14 @@ func TestAuthorize_ScopeWithoutOpenID(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	// 未認証なのでログインへリダイレクト（scope エラーにはならない）
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected %d (redirect to login), got %d body=%s", http.StatusFound, w.Code, w.Body.String())
 	}
-	assertErrorResponse(t, w, "invalid_scope")
+	location := w.Header().Get("Location")
+	if !strings.HasPrefix(location, "/login?redirect_to=") {
+		t.Errorf("expected redirect to /login, got %q", location)
+	}
 }
 
 // --- /authorize テスト: 未認証 → ログインリダイレクト ---

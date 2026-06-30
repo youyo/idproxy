@@ -303,11 +303,16 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// scope に "openid" を含む
+	// scope に "openid" を含む。
+	// MCP クライアント（claude.ai 等）は openid を省略する場合があるため、
+	// Gateway→IdP の脚では常に openid を付与して ID Token を取得できるよう自動補完する。
 	scope := q.Get("scope")
 	if !strings.Contains(scope, "openid") {
-		s.authorizeError(w, "invalid_scope", "scope must include 'openid'", http.StatusBadRequest)
-		return
+		if scope == "" {
+			scope = "openid"
+		} else {
+			scope = "openid " + scope
+		}
 	}
 
 	// --- ユーザー認証確認 ---
