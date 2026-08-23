@@ -231,6 +231,11 @@ type ClientData struct {
 	// Scope はスペース区切りのスコープ文字列。
 	Scope string `json:"scope,omitempty"`
 
+	// ApplicationType はクライアント種別（"web" / "native"。SEP-837）。
+	// 未指定で登録された場合は "web" が既定として補完される。
+	// 現時点では保存と登録応答への反映のみで、認可挙動には影響しない。
+	ApplicationType string `json:"application_type,omitempty"`
+
 	// CreatedAt はクライアント登録日時。
 	CreatedAt time.Time `json:"created_at"`
 }

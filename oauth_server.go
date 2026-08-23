@@ -441,7 +441,7 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// redirect_uri にリダイレクト（code, state をクエリパラメータで付加）
+	// redirect_uri にリダイレクト（code, state, iss をクエリパラメータで付加）
 	redirectURL, err := url.Parse(redirectURI)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -450,6 +450,9 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	rq := redirectURL.Query()
 	rq.Set("code", code)
 	rq.Set("state", state)
+	// RFC 9207: mix-up 攻撃対策として認可レスポンスに issuer 識別子を含める。
+	// 値は AS メタデータの issuer（ExternalURL）と同一でなければならない。
+	rq.Set("iss", s.config.ExternalURL)
 	redirectURL.RawQuery = rq.Encode()
 
 	http.Redirect(w, r, redirectURL.String(), http.StatusFound)
@@ -867,9 +870,10 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	// リクエスト JSON パース
 	var req struct {
-		RedirectURIs []string `json:"redirect_uris"`
-		ClientName   string   `json:"client_name"`
-		Scope        string   `json:"scope"`
+		RedirectURIs    []string `json:"redirect_uris"`
+		ClientName      string   `json:"client_name"`
+		Scope           string   `json:"scope"`
+		ApplicationType string   `json:"application_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.registerError(w, "invalid_request", "failed to parse JSON body", http.StatusBadRequest)
@@ -891,6 +895,16 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// application_type（SEP-837）: 未指定なら "web" を既定とする。
+	// RFC 7591 は未対応メタデータの無視を許容するため、未知の値でも登録は拒否せず
+	// そのまま保存する（認可挙動には使わない）。
+	applicationType := req.ApplicationType
+	if applicationType == "" {
+		applicationType = "web"
+	} else if applicationType != "web" && applicationType != "native" {
+		s.logger.Debug("oauth register: unknown application_type", "application_type", applicationType)
+	}
+
 	// client_id を UUID で自動生成
 	clientID := uuid.New().String()
 	now := time.Now()
@@ -903,6 +917,7 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "none",
 		Scope:                   req.Scope,
+		ApplicationType:         applicationType,
 		CreatedAt:               now,
 	}
 
@@ -919,6 +934,7 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		"grant_types":                clientData.GrantTypes,
 		"response_types":             clientData.ResponseTypes,
 		"token_endpoint_auth_method": clientData.TokenEndpointAuthMethod,
+		"application_type":           clientData.ApplicationType,
 	}
 	if clientData.ClientName != "" {
 		resp["client_name"] = clientData.ClientName
