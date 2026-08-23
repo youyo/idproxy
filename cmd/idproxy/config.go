@@ -231,6 +231,8 @@ Environment Variables:
 
   Required:
     UPSTREAM_URL          Backend URL to proxy to (e.g. http://localhost:3000)
+                          Unix domain socket: unix:///path/to/backend.sock
+                          (absolute socket path required)
     EXTERNAL_URL          External URL of this service (e.g. https://proxy.example.com)
     COOKIE_SECRET         Cookie encryption key, hex-encoded 32+ bytes
                           Generate with: openssl rand -hex 32
