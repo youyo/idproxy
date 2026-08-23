@@ -2,10 +2,14 @@ package idproxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -820,5 +824,233 @@ func TestWrap_StoreIDToken_False(t *testing.T) {
 	}
 	if gotUser.IDToken != "" {
 		t.Errorf("IDToken should be empty when StoreIDToken=false, got %q", gotUser.IDToken)
+	}
+}
+
+// --- WWW-Authenticate / Protected Resource Metadata（RFC 9728）テスト ---
+
+// setupAuthWithOAuth は OAuth 2.1 AS を有効にした Auth を構築するヘルパー。
+// bearerValidator と oauthServer の双方が設定された構成になる。
+func setupAuthWithOAuth(t *testing.T, opts ...func(*Config)) *Auth {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate ECDSA key: %v", err)
+	}
+
+	withOAuth := func(c *Config) {
+		c.OAuth = &OAuthConfig{SigningKey: key}
+	}
+
+	a, _ := setupAuth(t, append([]func(*Config){withOAuth}, opts...)...)
+	return a
+}
+
+// TestAuth_ProtectedResourceMetadataPath_ReachableWithPathPrefix は PathPrefix が非空でも
+// RFC 9728 準拠の素パスが未認証で OAuthServer に到達することを検証する。
+func TestAuth_ProtectedResourceMetadataPath_ReachableWithPathPrefix(t *testing.T) {
+	a, _ := setupAuth(t, func(c *Config) {
+		c.PathPrefix = "/auth"
+	})
+
+	oauthCalled := false
+	a.SetOAuthServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		oauthCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called for the protected resource metadata path")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource", nil)
+	rec := httptest.NewRecorder()
+
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if !oauthCalled {
+		t.Error("oauthServer should have been called for the bare protected resource metadata path")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+// TestAuth_WWWAuthenticate_ResourceMetadata は 401 を返す 3 経路すべてで
+// WWW-Authenticate ヘッダーに RFC 9728 の resource_metadata が付くことを検証する。
+func TestAuth_WWWAuthenticate_ResourceMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		auth    func(t *testing.T) *Auth
+		request func() *http.Request
+	}{
+		{
+			// bearerValidator == nil（OAuth 未設定）でも OAuthServer が
+			// SetOAuthServer で設定されていれば広告する。
+			name: "bearer token without validator",
+			auth: func(t *testing.T) *Auth {
+				a, _ := setupAuth(t)
+				a.SetOAuthServer(http.NotFoundHandler())
+				return a
+			},
+			request: func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+				req.Header.Set("Authorization", "Bearer some-jwt-token")
+				return req
+			},
+		},
+		{
+			name: "bearer token validation failure",
+			auth: func(t *testing.T) *Auth { return setupAuthWithOAuth(t) },
+			request: func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+				req.Header.Set("Authorization", "Bearer invalid-jwt-token")
+				return req
+			},
+		},
+		{
+			name: "unauthenticated API request",
+			auth: func(t *testing.T) *Auth { return setupAuthWithOAuth(t) },
+			request: func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+				req.Header.Set("Accept", "application/json")
+				return req
+			},
+		},
+	}
+
+	const want = `resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource"`
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := tt.auth(t)
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("next handler should not be called")
+			})
+
+			rec := httptest.NewRecorder()
+			a.Wrap(next).ServeHTTP(rec, tt.request())
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401, got %d", rec.Code)
+			}
+			wwwAuth := rec.Header().Get("WWW-Authenticate")
+			if !strings.HasPrefix(wwwAuth, "Bearer ") {
+				t.Fatalf("WWW-Authenticate should be a Bearer challenge, got %q", wwwAuth)
+			}
+			if !strings.Contains(wwwAuth, want) {
+				t.Errorf("WWW-Authenticate should contain %s, got %q", want, wwwAuth)
+			}
+		})
+	}
+}
+
+// TestAuth_WWWAuthenticate_ResourceMetadataURL は resource_metadata の URL が
+// PathPrefix に依存せず、ExternalURL の末尾スラッシュを正規化することを検証する。
+func TestAuth_WWWAuthenticate_ResourceMetadataURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		externalURL string
+		pathPrefix  string
+		want        string
+	}{
+		{"no prefix", "http://localhost:8080", "", `resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource"`},
+		{"with prefix", "http://localhost:8080", "/auth", `resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource"`},
+		{"trailing slash", "https://example.com/", "", `resource_metadata="https://example.com/.well-known/oauth-protected-resource"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := setupAuthWithOAuth(t, func(c *Config) {
+				c.ExternalURL = tt.externalURL
+				c.PathPrefix = tt.pathPrefix
+			})
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("next handler should not be called")
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+			req.Header.Set("Accept", "application/json")
+			rec := httptest.NewRecorder()
+
+			a.Wrap(next).ServeHTTP(rec, req)
+
+			wwwAuth := rec.Header().Get("WWW-Authenticate")
+			if !strings.Contains(wwwAuth, tt.want) {
+				t.Errorf("WWW-Authenticate should contain %s, got %q", tt.want, wwwAuth)
+			}
+		})
+	}
+}
+
+// TestAuth_WWWAuthenticate_NoOAuthServer は OAuthServer 未設定の構成では
+// resource_metadata を広告しない（fail-closed）ことを検証する。
+func TestAuth_WWWAuthenticate_NoOAuthServer(t *testing.T) {
+	tests := []struct {
+		name    string
+		request func() *http.Request
+	}{
+		{
+			name: "bearer token without validator",
+			request: func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+				req.Header.Set("Authorization", "Bearer some-jwt-token")
+				return req
+			},
+		},
+		{
+			name: "unauthenticated API request",
+			request: func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+				req.Header.Set("Accept", "application/json")
+				return req
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, _ := setupAuth(t)
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("next handler should not be called")
+			})
+
+			rec := httptest.NewRecorder()
+			a.Wrap(next).ServeHTTP(rec, tt.request())
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401, got %d", rec.Code)
+			}
+			wwwAuth := rec.Header().Get("WWW-Authenticate")
+			if !strings.HasPrefix(wwwAuth, "Bearer ") {
+				t.Fatalf("WWW-Authenticate should be a Bearer challenge, got %q", wwwAuth)
+			}
+			if strings.Contains(wwwAuth, "resource_metadata") {
+				t.Errorf("WWW-Authenticate should not advertise resource_metadata without OAuth server, got %q", wwwAuth)
+			}
+		})
+	}
+}
+
+// TestAuth_BrowserUnauthenticated_NoWWWAuthenticate はブラウザ経路（リダイレクト）が
+// WWW-Authenticate を付けない従来の挙動のままであることを検証する。
+func TestAuth_BrowserUnauthenticated_NoWWWAuthenticate(t *testing.T) {
+	a := setupAuthWithOAuth(t)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("next handler should not be called")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	a.Wrap(next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec.Code)
+	}
+	if wwwAuth := rec.Header().Get("WWW-Authenticate"); wwwAuth != "" {
+		t.Errorf("browser redirect should not set WWW-Authenticate, got %q", wwwAuth)
 	}
 }

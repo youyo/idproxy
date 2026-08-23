@@ -101,9 +101,32 @@ func NewOAuthServer(cfg Config, store Store, sm *SessionManager, pm *ProviderMan
 	}, nil
 }
 
+// protectedResourceMetadataPath は RFC 9728 が定める Protected Resource Metadata の
+// well-known パス。resource identifier（ExternalURL）が path を持たないため、
+// PathPrefix の有無に関わらずこの素のパスで提供する。
+const protectedResourceMetadataPath = "/.well-known/oauth-protected-resource"
+
+// supportedScopes は AS メタデータと Protected Resource Metadata の双方が広告する
+// サポート scope の一覧。
+var supportedScopes = []string{"openid", "email", "profile"}
+
+// isProtectedResourceMetadataPath はパスが Protected Resource Metadata に該当するかを判定する。
+// RFC 9728 準拠の素のパスに加え、既存 well-known 体系との互換のため
+// PathPrefix 付きのパスも alias として受け付ける（PathPrefix が空なら両者は同一）。
+func isProtectedResourceMetadataPath(prefix, path string) bool {
+	return path == protectedResourceMetadataPath || path == prefix+protectedResourceMetadataPath
+}
+
 // ServeHTTP はリクエストを適切なハンドラーにルーティングする。
 func (s *OAuthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	prefix := s.config.PathPrefix
+
+	// PathPrefix 付き alias と素のパスの 2 通りがあり switch の case では表現できないため、
+	// switch の前に判定する。
+	if isProtectedResourceMetadataPath(prefix, r.URL.Path) {
+		s.protectedResourceMetadataHandler(w, r)
+		return
+	}
 
 	switch r.URL.Path {
 	case prefix + "/.well-known/oauth-authorization-server":
@@ -142,7 +165,30 @@ func (s *OAuthServer) metadataHandler(w http.ResponseWriter, r *http.Request) {
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
-		"scopes_supported":                      []string{"openid", "email", "profile"},
+		"scopes_supported":                      supportedScopes,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(metadata)
+}
+
+// protectedResourceMetadataHandler は GET /.well-known/oauth-protected-resource を処理する。
+// RFC 9728 準拠の Protected Resource Metadata JSON を返す。
+// idproxy 自身が AS を兼ねるため authorization_servers は自 issuer 1 件になる。
+func (s *OAuthServer) protectedResourceMetadataHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	baseURL := s.config.ExternalURL
+
+	metadata := map[string]any{
+		"resource":                 baseURL,
+		"authorization_servers":    []string{baseURL},
+		"scopes_supported":         supportedScopes,
+		"bearer_methods_supported": []string{"header"},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
