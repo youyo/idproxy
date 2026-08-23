@@ -41,6 +41,8 @@ type OAuthServer struct {
 	refreshTokenTTL time.Duration
 	// logger は構造化ログ出力に使用する。
 	logger *slog.Logger
+	// cimd は URL 形式 client_id（CIMD）の解決に使用する。
+	cimd *cimdFetcher
 }
 
 // NewOAuthServer は OAuthServer を構築する。
@@ -98,6 +100,7 @@ func NewOAuthServer(cfg Config, store Store, sm *SessionManager, pm *ProviderMan
 		accessTokenTTL:  accessTokenTTL,
 		refreshTokenTTL: refreshTokenTTL,
 		logger:          logger,
+		cimd:            newCIMDFetcher(denyInternalIP),
 	}, nil
 }
 
@@ -166,6 +169,8 @@ func (s *OAuthServer) metadataHandler(w http.ResponseWriter, r *http.Request) {
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      supportedScopes,
+		// CIMD（MCP 2026-07-28）: URL 形式 client_id を受け付けることを広告する。
+		"client_id_metadata_document_supported": true,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -281,33 +286,38 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// client_id の検証: 静的設定 → 動的登録クライアント → デフォルト許可
+	// client_id の検証: 静的設定 → CIMD → 動的登録クライアント → デフォルト許可
+	hasStaticClientID := s.config.OAuth != nil && s.config.OAuth.ClientID != ""
 	var dynamicClient *ClientData
-	if s.config.OAuth != nil && s.config.OAuth.ClientID != "" {
-		// 静的クライアント ID が設定されている場合
-		if clientID != s.config.OAuth.ClientID {
-			// 動的登録クライアントも確認
-			client, err := s.store.GetClient(r.Context(), clientID)
-			if err != nil {
-				http.Error(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-			if client == nil {
-				s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
-				return
-			}
-			dynamicClient = client
+	switch {
+	case hasStaticClientID && clientID == s.config.OAuth.ClientID:
+		// 静的クライアント ID と一致: 追加の解決は不要
+
+	case isCIMDClientID(clientID):
+		// URL 形式 client_id は CIMD として解決する。
+		// fetch・検証の失敗はすべて invalid_client に潰し、静的 ClientID 未設定でも
+		// デフォルト許可経路へ落とさない（fail-closed）。
+		client, err := s.cimd.resolve(r.Context(), clientID)
+		if err != nil {
+			// 失敗理由は攻撃者への情報になるため応答本文には出さない。
+			s.logger.Debug("cimd resolve failed", "client_id", clientID, "error", err)
+			s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
+			return
 		}
-	} else {
-		// 静的クライアント ID 未設定: 動的登録クライアントを確認
+		dynamicClient = client
+
+	default:
+		// 動的登録（DCR）クライアントを確認
 		client, err := s.store.GetClient(r.Context(), clientID)
 		if err != nil {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
-		if client != nil {
-			dynamicClient = client
+		if client == nil && hasStaticClientID {
+			s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
+			return
 		}
+		dynamicClient = client
 	}
 
 	// redirect_uri 検証: 動的登録クライアントの場合は登録済み URI と照合
