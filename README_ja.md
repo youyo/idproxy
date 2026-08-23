@@ -4,14 +4,16 @@
 
 OIDC 認証リバースプロキシ + MCP OAuth 2.1 Authorization Server。
 
-idproxy は任意の HTTP バックエンドの前段に配置し、OIDC によるブラウザ認証と OAuth 2.1 Bearer Token 検証を透過的に提供します。MCP (Model Context Protocol) サーバーを保護する OAuth 2.1 AS としても動作し、Dynamic Client Registration (RFC 7591) をサポートします。
+idproxy は任意の HTTP バックエンドの前段に配置し、OIDC によるブラウザ認証と OAuth 2.1 Bearer Token 検証を透過的に提供します。MCP (Model Context Protocol) サーバーを保護する OAuth 2.1 AS としても動作し、Dynamic Client Registration (RFC 7591) と Client ID Metadata Documents (CIMD) をサポートします。
 
 ## 特徴
 
 - OIDC ベースのブラウザ認証（Google, Microsoft Entra ID 等）
 - OAuth 2.1 Authorization Server（PKCE 必須、Bearer Token 発行、refresh_token ローテーション）
-- Dynamic Client Registration (RFC 7591)
-- SSE (Server-Sent Events) 透過プロキシ
+- Dynamic Client Registration (RFC 7591) と Client ID Metadata Documents (CIMD、MCP spec `2026-07-28`)
+- Protected Resource Metadata (RFC 9728) と `WWW-Authenticate: resource_metadata=...`
+- authorization response への `iss` パラメータ付与 (RFC 9207)
+- SSE (Server-Sent Events) 透過プロキシ、および POST レスポンスの長寿命ストリームに対する stateless Streamable HTTP 透過性
 - MCP サーバー保護に最適化
 - ゼロ依存のインメモリセッションストア（本番用に差し替え可能）
 
@@ -75,7 +77,7 @@ services:
 
 | 変数名 | 説明 | 例 |
 |--------|------|-----|
-| `UPSTREAM_URL` | プロキシ先のバックエンド URL | `http://localhost:3000` |
+| `UPSTREAM_URL` | プロキシ先のバックエンド URL。`unix:///absolute/path/to/backend.sock` で Unix domain socket も指定可能 | `http://localhost:3000` または `unix:///run/backend.sock` |
 | `EXTERNAL_URL` | このサービスの外部公開 URL | `https://mcp-auth.example.com` |
 | `COOKIE_SECRET` | Cookie 暗号化キー（hex エンコード、32 バイト以上） | `openssl rand -hex 32` で生成 |
 | `OIDC_ISSUER` | OIDC Issuer URL（カンマ区切りで複数指定可） | `https://accounts.google.com` |
@@ -91,6 +93,7 @@ services:
 | `ALLOWED_EMAILS` | 許可メールアドレス（カンマ区切り） | 制限なし |
 | `PATH_PREFIX` | OAuth 2.1 AS エンドポイントのパスプレフィックス | なし |
 | `PORT` | リッスンポート | `8080` |
+| `UPSTREAM_AUTH_TOKEN` | upstream への全リクエストに `Authorization: Bearer <値>` として注入するトークン。注入前にクライアント自身の `Authorization` ヘッダーを削除する（upstream にはクライアントの値は一切渡らない）。**未設定時はクライアントの `Authorization` ヘッダーがそのまま upstream に届く**（既定挙動で、既存デプロイの挙動は変わらない） | なし |
 
 ## プロバイダー設定
 
@@ -326,6 +329,30 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
+
+`Config.OAuth` を設定すると、idproxy は次も併せて提供します。
+
+- `GET /.well-known/oauth-protected-resource` — Protected Resource Metadata (RFC 9728)。resource identifier（`ExternalURL`）が path を持たないため `PATH_PREFIX` の有無に関わらずこの素のパスで提供する。すべての `401` 応答（Bearer トークン未指定/検証失敗、未認証の API リクエスト）に `WWW-Authenticate: Bearer resource_metadata="<ExternalURL>/.well-known/oauth-protected-resource", ...` が付与され、MCP クライアントは 401 → PRM → AS metadata の順で discovery できる。
+- authorization response のリダイレクトに `code` / `state` と並んで `iss=<ExternalURL>` が含まれる (RFC 9207)。値は AS metadata の `issuer` と一致するため、RFC 9207 準拠クライアントはリダイレクト後に `iss` を検証できる。
+
+#### Client ID Metadata Documents (CIMD)
+
+MCP spec `2026-07-28` は Dynamic Client Registration (RFC 7591) を Deprecated とし CIMD を推奨するが、idproxy は両方を併存させる — 既存の DCR 登録（UUID 形式の `client_id`）は挙動を変えず通る。
+
+- クライアントは path コンポーネントを持つ `https://` URL（例 `https://client.example.com/.well-known/mcp-client.json`）を `client_id` として提示する。`http://` の client_id、および path を持たない `https://` URL（`https://example.com`、`https://example.com/`）は CIMD 経路に入らず、通常の（DCR/静的）client_id として扱われる。
+- idproxy はその URL を fetch する。`200` かつ `Content-Type: application/json`、本文 5KB 以下のみを受理し、リダイレクト応答は拒否する。取得した metadata 内の `client_id` は fetch 元 URL と厳密一致していなければならず、`redirect_uris` は非空である必要がある — 認可リクエストの `redirect_uri` は DCR クライアントと同じ照合ロジックで検証される。
+- fetch はホスト名を解決した上で、解決された IP アドレスそのものを検査してから接続する（ホスト名のまま dial しない）。loopback・RFC1918 private・link-local・unspecified・multicast・CGNAT (`100.64.0.0/10`)・IPv6 ULA (`fc00::/7`) への接続を拒否する。検査対象と接続先が同じ IP アドレスであるため、これにより DNS rebinding も同時に塞がれる。
+- fetch に成功した結果はプロセス内キャッシュのみに保持する（`Store` には一切書き込まない）。TTL は応答の `Cache-Control: max-age` を尊重し `[60秒, 24時間]` にクランプする。`max-age` が無ければ既定 15 分、`no-store` / `no-cache` のときはキャッシュしない。fetch 失敗時は古いキャッシュへフォールバックせず `400 invalid_client` で fail-closed になる。
+- AS metadata（`/.well-known/oauth-authorization-server`）に `client_id_metadata_document_supported: true` が含まれる。
+
+### `focal` の MCP サーバーを idproxy の後段に置く
+
+[youyo/focal](https://github.com/youyo/focal) の `focal serve` は認証を持たない stateless Streamable HTTP の MCP エンドポイントを公開し、前段に認証プロキシを置くことを前提にしている。idproxy の `UPSTREAM_URL` の Unix domain socket 対応と `UPSTREAM_AUTH_TOKEN` は、focal 側の 2 つの upstream 強化手段にそのまま対応する。
+
+- **同一ホスト・同一 UID — Unix domain socket。** focal が listen する socket（`focal serve --listen unix:/run/focal/focal.sock`）を `UPSTREAM_URL` で指す: `UPSTREAM_URL=unix:///run/focal/focal.sock`。socket は `0600` のため到達できるのは同一ユーザーのみで、idproxy と focal は同一 UID で動かす必要がある。
+- **別ホスト・別コンテナ — 共有トークン。** `focal serve` を `FOCAL_UPSTREAM_TOKEN` 設定付きで起動し、idproxy 側の `UPSTREAM_AUTH_TOKEN` に同じ値を設定する。idproxy は upstream へのすべてのリクエストに `Authorization: Bearer <UPSTREAM_AUTH_TOKEN>` を注入し、クライアントが送った `Authorization` は削除する。そのため focal 側にはクライアントの OAuth Bearer トークンは一切届かず、常に共有トークンだけが見える。
+
+いずれの方式でもクライアント側のフローは変わらない。Claude Desktop（等の MCP クライアント）は `EXTERNAL_URL` 経由で idproxy の OAuth 2.1 AS に対して認証し、idproxy は認証を通過したリクエストだけを `UPSTREAM_URL` 経由で focal に転送する。
 
 ## リフレッシュトークン Rotation の設計方針
 
