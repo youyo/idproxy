@@ -40,7 +40,7 @@ func TestNewReverseProxy_UsesRewriteHook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newReverseProxy() error: %v", err)
 	}
-	if proxy.Director != nil {
+	if proxy.Director != nil { //nolint:staticcheck // Rewrite 移行の回帰確認として deprecated フィールドが未使用であることを検証する
 		t.Error("Director must be nil (Rewrite フックへ移行済みであること)")
 	}
 	if proxy.Rewrite == nil {
