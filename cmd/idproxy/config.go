@@ -14,9 +14,17 @@ import (
 	sqlitestore "github.com/youyo/idproxy/store/sqlite"
 )
 
-// parseConfig builds Config, upstream URL, and listenAddr from environment variables.
+// proxyConfig はリバースプロキシとサーバー起動に必要な設定をまとめる。
+// idproxy.Config（認証設定）には属さないプロセス側の設定のみを持つ。
+type proxyConfig struct {
+	upstream          string
+	listenAddr        string
+	upstreamAuthToken string
+}
+
+// parseConfig builds Config and proxyConfig from environment variables.
 // Returns an error if required environment variables are missing.
-func parseConfig() (idproxy.Config, string, string, error) {
+func parseConfig() (idproxy.Config, proxyConfig, error) {
 	var cfg idproxy.Config
 	var errs []string
 
@@ -108,6 +116,10 @@ func parseConfig() (idproxy.Config, string, string, error) {
 	}
 	listenAddr := ":" + port
 
+	// UPSTREAM_AUTH_TOKEN (optional)
+	// 設定時は upstream へ Authorization: Bearer <値> を固定注入する。
+	upstreamAuthToken := os.Getenv("UPSTREAM_AUTH_TOKEN")
+
 	// Store (STORE_BACKEND で切替。デフォルトは memory)
 	s, storeErr := loadStore()
 	if storeErr != nil {
@@ -122,10 +134,14 @@ func parseConfig() (idproxy.Config, string, string, error) {
 	// SigningKey must be loaded from JWT_SIGNING_KEY_FILE (M18 scope)
 
 	if len(errs) > 0 {
-		return idproxy.Config{}, "", "", fmt.Errorf("config error: %s", strings.Join(errs, "; "))
+		return idproxy.Config{}, proxyConfig{}, fmt.Errorf("config error: %s", strings.Join(errs, "; "))
 	}
 
-	return cfg, upstream, listenAddr, nil
+	return cfg, proxyConfig{
+		upstream:          upstream,
+		listenAddr:        listenAddr,
+		upstreamAuthToken: upstreamAuthToken,
+	}, nil
 }
 
 // loadStore は STORE_BACKEND 環境変数を見て idproxy.Store 実装を生成する。
@@ -215,6 +231,8 @@ Environment Variables:
 
   Required:
     UPSTREAM_URL          Backend URL to proxy to (e.g. http://localhost:3000)
+                          Unix domain socket: unix:///path/to/backend.sock
+                          (absolute socket path required)
     EXTERNAL_URL          External URL of this service (e.g. https://proxy.example.com)
     COOKIE_SECRET         Cookie encryption key, hex-encoded 32+ bytes
                           Generate with: openssl rand -hex 32
@@ -228,6 +246,8 @@ Environment Variables:
     ALLOWED_EMAILS        Allowed email addresses (comma-separated)
     PATH_PREFIX           OAuth 2.1 AS endpoint path prefix
     PORT                  Listen port (default: 8080)
+    UPSTREAM_AUTH_TOKEN   Token injected as "Authorization: Bearer <value>" on
+                          upstream requests (client Authorization is removed)
 
   Store backend (optional, default: memory):
     STORE_BACKEND         Store backend: memory (default) | dynamodb | sqlite | redis

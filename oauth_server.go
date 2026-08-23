@@ -41,6 +41,8 @@ type OAuthServer struct {
 	refreshTokenTTL time.Duration
 	// logger は構造化ログ出力に使用する。
 	logger *slog.Logger
+	// cimd は URL 形式 client_id（CIMD）の解決に使用する。
+	cimd *cimdFetcher
 }
 
 // NewOAuthServer は OAuthServer を構築する。
@@ -98,12 +100,36 @@ func NewOAuthServer(cfg Config, store Store, sm *SessionManager, pm *ProviderMan
 		accessTokenTTL:  accessTokenTTL,
 		refreshTokenTTL: refreshTokenTTL,
 		logger:          logger,
+		cimd:            newCIMDFetcher(denyInternalIP),
 	}, nil
+}
+
+// protectedResourceMetadataPath は RFC 9728 が定める Protected Resource Metadata の
+// well-known パス。resource identifier（ExternalURL）が path を持たないため、
+// PathPrefix の有無に関わらずこの素のパスで提供する。
+const protectedResourceMetadataPath = "/.well-known/oauth-protected-resource"
+
+// supportedScopes は AS メタデータと Protected Resource Metadata の双方が広告する
+// サポート scope の一覧。
+var supportedScopes = []string{"openid", "email", "profile"}
+
+// isProtectedResourceMetadataPath はパスが Protected Resource Metadata に該当するかを判定する。
+// RFC 9728 準拠の素のパスに加え、既存 well-known 体系との互換のため
+// PathPrefix 付きのパスも alias として受け付ける（PathPrefix が空なら両者は同一）。
+func isProtectedResourceMetadataPath(prefix, path string) bool {
+	return path == protectedResourceMetadataPath || path == prefix+protectedResourceMetadataPath
 }
 
 // ServeHTTP はリクエストを適切なハンドラーにルーティングする。
 func (s *OAuthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	prefix := s.config.PathPrefix
+
+	// PathPrefix 付き alias と素のパスの 2 通りがあり switch の case では表現できないため、
+	// switch の前に判定する。
+	if isProtectedResourceMetadataPath(prefix, r.URL.Path) {
+		s.protectedResourceMetadataHandler(w, r)
+		return
+	}
 
 	switch r.URL.Path {
 	case prefix + "/.well-known/oauth-authorization-server":
@@ -142,7 +168,32 @@ func (s *OAuthServer) metadataHandler(w http.ResponseWriter, r *http.Request) {
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
-		"scopes_supported":                      []string{"openid", "email", "profile"},
+		"scopes_supported":                      supportedScopes,
+		// CIMD（MCP 2026-07-28）: URL 形式 client_id を受け付けることを広告する。
+		"client_id_metadata_document_supported": true,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(metadata)
+}
+
+// protectedResourceMetadataHandler は GET /.well-known/oauth-protected-resource を処理する。
+// RFC 9728 準拠の Protected Resource Metadata JSON を返す。
+// idproxy 自身が AS を兼ねるため authorization_servers は自 issuer 1 件になる。
+func (s *OAuthServer) protectedResourceMetadataHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	baseURL := s.config.ExternalURL
+
+	metadata := map[string]any{
+		"resource":                 baseURL,
+		"authorization_servers":    []string{baseURL},
+		"scopes_supported":         supportedScopes,
+		"bearer_methods_supported": []string{"header"},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -235,33 +286,38 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// client_id の検証: 静的設定 → 動的登録クライアント → デフォルト許可
+	// client_id の検証: 静的設定 → CIMD → 動的登録クライアント → デフォルト許可
+	hasStaticClientID := s.config.OAuth != nil && s.config.OAuth.ClientID != ""
 	var dynamicClient *ClientData
-	if s.config.OAuth != nil && s.config.OAuth.ClientID != "" {
-		// 静的クライアント ID が設定されている場合
-		if clientID != s.config.OAuth.ClientID {
-			// 動的登録クライアントも確認
-			client, err := s.store.GetClient(r.Context(), clientID)
-			if err != nil {
-				http.Error(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-			if client == nil {
-				s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
-				return
-			}
-			dynamicClient = client
+	switch {
+	case hasStaticClientID && clientID == s.config.OAuth.ClientID:
+		// 静的クライアント ID と一致: 追加の解決は不要
+
+	case isCIMDClientID(clientID):
+		// URL 形式 client_id は CIMD として解決する。
+		// fetch・検証の失敗はすべて invalid_client に潰し、静的 ClientID 未設定でも
+		// デフォルト許可経路へ落とさない（fail-closed）。
+		client, err := s.cimd.resolve(r.Context(), clientID)
+		if err != nil {
+			// 失敗理由は攻撃者への情報になるため応答本文には出さない。
+			s.logger.Debug("cimd resolve failed", "client_id", clientID, "error", err)
+			s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
+			return
 		}
-	} else {
-		// 静的クライアント ID 未設定: 動的登録クライアントを確認
+		dynamicClient = client
+
+	default:
+		// 動的登録（DCR）クライアントを確認
 		client, err := s.store.GetClient(r.Context(), clientID)
 		if err != nil {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
-		if client != nil {
-			dynamicClient = client
+		if client == nil && hasStaticClientID {
+			s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
+			return
 		}
+		dynamicClient = client
 	}
 
 	// redirect_uri 検証: 動的登録クライアントの場合は登録済み URI と照合
@@ -395,7 +451,7 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// redirect_uri にリダイレクト（code, state をクエリパラメータで付加）
+	// redirect_uri にリダイレクト（code, state, iss をクエリパラメータで付加）
 	redirectURL, err := url.Parse(redirectURI)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -404,6 +460,9 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	rq := redirectURL.Query()
 	rq.Set("code", code)
 	rq.Set("state", state)
+	// RFC 9207: mix-up 攻撃対策として認可レスポンスに issuer 識別子を含める。
+	// 値は AS メタデータの issuer（ExternalURL）と同一でなければならない。
+	rq.Set("iss", s.config.ExternalURL)
 	redirectURL.RawQuery = rq.Encode()
 
 	http.Redirect(w, r, redirectURL.String(), http.StatusFound)
@@ -821,9 +880,10 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	// リクエスト JSON パース
 	var req struct {
-		RedirectURIs []string `json:"redirect_uris"`
-		ClientName   string   `json:"client_name"`
-		Scope        string   `json:"scope"`
+		RedirectURIs    []string `json:"redirect_uris"`
+		ClientName      string   `json:"client_name"`
+		Scope           string   `json:"scope"`
+		ApplicationType string   `json:"application_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.registerError(w, "invalid_request", "failed to parse JSON body", http.StatusBadRequest)
@@ -845,6 +905,16 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// application_type（SEP-837）: 未指定なら "web" を既定とする。
+	// RFC 7591 は未対応メタデータの無視を許容するため、未知の値でも登録は拒否せず
+	// そのまま保存する（認可挙動には使わない）。
+	applicationType := req.ApplicationType
+	if applicationType == "" {
+		applicationType = "web"
+	} else if applicationType != "web" && applicationType != "native" {
+		s.logger.Debug("oauth register: unknown application_type", "application_type", applicationType)
+	}
+
 	// client_id を UUID で自動生成
 	clientID := uuid.New().String()
 	now := time.Now()
@@ -857,6 +927,7 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "none",
 		Scope:                   req.Scope,
+		ApplicationType:         applicationType,
 		CreatedAt:               now,
 	}
 
@@ -873,6 +944,7 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		"grant_types":                clientData.GrantTypes,
 		"response_types":             clientData.ResponseTypes,
 		"token_endpoint_auth_method": clientData.TokenEndpointAuthMethod,
+		"application_type":           clientData.ApplicationType,
 	}
 	if clientData.ClientName != "" {
 		resp["client_name"] = clientData.ClientName

@@ -4,14 +4,16 @@
 
 OIDC authentication reverse proxy + MCP OAuth 2.1 Authorization Server.
 
-idproxy sits in front of any HTTP backend and transparently provides OIDC browser authentication and OAuth 2.1 Bearer Token validation. It also acts as an OAuth 2.1 Authorization Server to protect MCP (Model Context Protocol) servers, with support for Dynamic Client Registration (RFC 7591).
+idproxy sits in front of any HTTP backend and transparently provides OIDC browser authentication and OAuth 2.1 Bearer Token validation. It also acts as an OAuth 2.1 Authorization Server to protect MCP (Model Context Protocol) servers, with support for Dynamic Client Registration (RFC 7591) and Client ID Metadata Documents (CIMD).
 
 ## Features
 
 - OIDC-based browser authentication (Google, Microsoft Entra ID, etc.)
 - OAuth 2.1 Authorization Server (PKCE required, Bearer Token issuance, refresh_token rotation)
-- Dynamic Client Registration (RFC 7591)
-- SSE (Server-Sent Events) transparent proxy
+- Dynamic Client Registration (RFC 7591) and Client ID Metadata Documents (CIMD, MCP spec `2026-07-28`)
+- Protected Resource Metadata (RFC 9728) and `WWW-Authenticate: resource_metadata=...`
+- `iss` parameter on the authorization response (RFC 9207)
+- SSE (Server-Sent Events) transparent proxy, and stateless Streamable HTTP transparency for POST-response long-lived streams
 - Optimized for protecting MCP servers
 - Zero-dependency in-memory session store (replaceable for production)
 
@@ -75,7 +77,7 @@ services:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `UPSTREAM_URL` | Backend URL to proxy to | `http://localhost:3000` |
+| `UPSTREAM_URL` | Backend URL to proxy to. Also accepts a Unix domain socket as `unix:///absolute/path/to/backend.sock` | `http://localhost:3000` or `unix:///run/backend.sock` |
 | `EXTERNAL_URL` | External URL of this service | `https://mcp-auth.example.com` |
 | `COOKIE_SECRET` | Cookie encryption key (hex-encoded, 32+ bytes) | Generate with `openssl rand -hex 32` |
 | `OIDC_ISSUER` | OIDC Issuer URL (comma-separated for multiple) | `https://accounts.google.com` |
@@ -91,6 +93,7 @@ services:
 | `ALLOWED_EMAILS` | Allowed email addresses (comma-separated) | no restriction |
 | `PATH_PREFIX` | OAuth 2.1 AS endpoint path prefix | none |
 | `PORT` | Listen port | `8080` |
+| `UPSTREAM_AUTH_TOKEN` | Token injected as `Authorization: Bearer <value>` on every upstream request; the client's own `Authorization` header is removed before injection (never forwarded to upstream). **If unset, the client's `Authorization` header is forwarded to upstream unchanged** — this is the default behavior and does not change existing deployments. | none |
 
 ## Provider Setup
 
@@ -398,6 +401,30 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
+
+When `Config.OAuth` is set, idproxy also serves:
+
+- `GET /.well-known/oauth-protected-resource` — Protected Resource Metadata (RFC 9728), independent of `PATH_PREFIX` since the `resource` identifier (`ExternalURL`) has no path component. Every `401` response (missing/invalid Bearer token, or an unauthenticated API request) carries `WWW-Authenticate: Bearer resource_metadata="<ExternalURL>/.well-known/oauth-protected-resource", ...` so MCP clients can discover it per the 401 → PRM → AS metadata sequence.
+- The authorization response redirect includes `iss=<ExternalURL>` alongside `code` and `state` (RFC 9207), matching the `issuer` in AS metadata, so RFC 9207-compliant clients can validate it against `iss` after the redirect.
+
+#### Client ID Metadata Documents (CIMD)
+
+MCP spec `2026-07-28` deprecates Dynamic Client Registration (RFC 7591) in favor of CIMD, but idproxy supports both side by side — DCR-registered UUID client IDs keep working unchanged.
+
+- A client presents an `https://` URL with a non-empty path (e.g. `https://client.example.com/.well-known/mcp-client.json`) as its `client_id`. `http://` URLs and path-less `https://` URLs (`https://example.com`, `https://example.com/`) never enter the CIMD path and are treated as regular (DCR/static) client IDs.
+- idproxy fetches the URL, requiring a `200` response with an `application/json` body no larger than 5 KB; redirects are rejected. The document's `client_id` must match the fetch URL exactly, and `redirect_uris` must be non-empty — the authorization request's `redirect_uri` is checked against them the same way as a DCR-registered client.
+- The fetch itself resolves the hostname and validates every resolved IP before dialing it (not the hostname after the fact), rejecting loopback, RFC 1918 private, link-local, unspecified, multicast, CGNAT (`100.64.0.0/10`), and IPv6 ULA (`fc00::/7`) ranges — this also closes off DNS rebinding, since the address that is checked is the exact address that is dialed.
+- Successful fetches are cached in-process (never written to `Store`) for the response's `Cache-Control: max-age` when present, clamped to `[60s, 24h]`; the default is 15 minutes when no `max-age` is given, and `no-store`/`no-cache` responses are never cached. A fetch failure never falls back to a stale cache entry — it fails closed with `400 invalid_client`.
+- `client_id_metadata_document_supported: true` is advertised in AS metadata (`/.well-known/oauth-authorization-server`).
+
+### Connecting to a `focal` MCP server behind idproxy
+
+[youyo/focal](https://github.com/youyo/focal)'s `focal serve` exposes an unauthenticated stateless Streamable HTTP MCP endpoint and expects an authenticating reverse proxy in front of it. idproxy's `UPSTREAM_URL` Unix domain socket support and `UPSTREAM_AUTH_TOKEN` map directly onto focal's two upstream-hardening options:
+
+- **Same host, same UID — Unix domain socket.** Point `UPSTREAM_URL` at the socket focal listens on (`focal serve --listen unix:/run/focal/focal.sock`): `UPSTREAM_URL=unix:///run/focal/focal.sock`. The socket's `0600` permissions restrict reachability to the same user; idproxy and focal must run under the same UID.
+- **Different hosts/containers — shared token.** Run `focal serve` with `FOCAL_UPSTREAM_TOKEN` set, and set idproxy's `UPSTREAM_AUTH_TOKEN` to the same value. idproxy injects `Authorization: Bearer <UPSTREAM_AUTH_TOKEN>` on every upstream request and strips whatever `Authorization` the client sent, so focal only ever sees the shared token, never the client's OAuth Bearer token.
+
+Either way, the client-facing flow is unchanged: Claude Desktop (or another MCP client) authenticates against idproxy's OAuth 2.1 AS over `EXTERNAL_URL`, and idproxy forwards only authenticated requests to focal over `UPSTREAM_URL`.
 
 ## Refresh Token Rotation Design
 

@@ -3739,3 +3739,197 @@ func TestRefreshToken_IDPRefresh_Failure_ReturnsInvalidGrant(t *testing.T) {
 	}
 	assertErrorResponse(t, w, "invalid_grant")
 }
+
+// --- /authorize テスト: RFC 9207 iss パラメータ ---
+
+// authorizeWithSession は認証済みセッション付きで /authorize を叩き、
+// リダイレクト先の Location を URL としてパースして返すヘルパー。
+func authorizeWithSession(t *testing.T, srv *OAuthServer, sm *SessionManager, q url.Values) *url.URL {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+	for _, c := range issueTestSession(t, sm) {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusFound, w.Code, w.Body.String())
+	}
+	locURL, err := url.Parse(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("failed to parse Location header: %v", err)
+	}
+	return locURL
+}
+
+func TestOAuthServer_AuthorizeIncludesIssuerParam(t *testing.T) {
+	srv, sm, _ := setupAuthorizeServer(t)
+
+	locURL := authorizeWithSession(t, srv, sm, validAuthorizeQuery())
+
+	// AS メタデータの issuer を取得し、iss がそれと一致することを確認する
+	metaReq := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+	metaW := httptest.NewRecorder()
+	srv.ServeHTTP(metaW, metaReq)
+	if metaW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for AS metadata, got %d", metaW.Code)
+	}
+	var meta map[string]any
+	if err := json.NewDecoder(metaW.Body).Decode(&meta); err != nil {
+		t.Fatalf("failed to decode AS metadata: %v", err)
+	}
+	issuer, _ := meta["issuer"].(string)
+	if issuer == "" {
+		t.Fatal("expected non-empty issuer in AS metadata")
+	}
+
+	if got := locURL.Query().Get("iss"); got != issuer {
+		t.Errorf("expected iss %q (AS metadata issuer), got %q", issuer, got)
+	}
+}
+
+func TestOAuthServer_AuthorizeIssuerCoexistsWithRedirectURIQuery(t *testing.T) {
+	srv, sm, _ := setupAuthorizeServer(t)
+
+	// 元からクエリを持つ redirect_uri を DCR で登録する
+	const redirectURI = "http://localhost:3000/callback?tenant=acme"
+	body, _ := json.Marshal(map[string]any{
+		"redirect_uris": []string{redirectURI},
+		"client_name":   "Query App",
+	})
+	regReq := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	regReq.Header.Set("Content-Type", "application/json")
+	regW := httptest.NewRecorder()
+	srv.ServeHTTP(regW, regReq)
+	if regW.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for /register, got %d: %s", regW.Code, regW.Body.String())
+	}
+	var regResp map[string]any
+	if err := json.NewDecoder(regW.Body).Decode(&regResp); err != nil {
+		t.Fatalf("failed to decode register response: %v", err)
+	}
+
+	q := validAuthorizeQuery()
+	q.Set("client_id", regResp["client_id"].(string))
+	q.Set("redirect_uri", redirectURI)
+
+	locURL := authorizeWithSession(t, srv, sm, q)
+	got := locURL.Query()
+
+	// 元のクエリが保持されたまま code / state / iss が共存する
+	if got.Get("tenant") != "acme" {
+		t.Errorf("expected original query tenant=acme to be preserved, got %q", locURL.RawQuery)
+	}
+	if got.Get("code") == "" {
+		t.Error("expected 'code' parameter in redirect URL")
+	}
+	if got.Get("state") != "random-state-value" {
+		t.Errorf("expected state %q, got %q", "random-state-value", got.Get("state"))
+	}
+	if got.Get("iss") != "http://localhost:8080" {
+		t.Errorf("expected iss %q, got %q", "http://localhost:8080", got.Get("iss"))
+	}
+}
+
+func TestOAuthServer_AuthorizeErrorResponseHasNoIssuerParam(t *testing.T) {
+	// authorizeError はリダイレクトを伴わない JSON 応答なので RFC 9207 の対象外。
+	srv, _, _ := setupAuthorizeServer(t)
+
+	q := validAuthorizeQuery()
+	q.Set("redirect_uri", "https://evil.example.com/callback")
+
+	req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if _, ok := resp["iss"]; ok {
+		t.Errorf("expected no 'iss' in non-redirect error response, got %v", resp)
+	}
+}
+
+// --- /register テスト: application_type（SEP-837） ---
+
+func TestOAuthServer_RegisterApplicationType(t *testing.T) {
+	tests := []struct {
+		name    string
+		request map[string]any
+		want    string
+	}{
+		{
+			name: "native を受理する",
+			request: map[string]any{
+				"redirect_uris":    []string{"http://127.0.0.1:8765/callback"},
+				"application_type": "native",
+			},
+			want: "native",
+		},
+		{
+			name: "web を受理する",
+			request: map[string]any{
+				"redirect_uris":    []string{"https://app.example.com/callback"},
+				"application_type": "web",
+			},
+			want: "web",
+		},
+		{
+			name: "未指定なら web を既定とする",
+			request: map[string]any{
+				"redirect_uris": []string{"https://app.example.com/callback"},
+			},
+			want: "web",
+		},
+		{
+			// RFC 7591 は未対応メタデータの無視を許容するため未知値でも登録は拒否しない。
+			name: "未知の値はそのまま保存する",
+			request: map[string]any{
+				"redirect_uris":    []string{"https://app.example.com/callback"},
+				"application_type": "service",
+			},
+			want: "service",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, st := setupAuthorizeServer(t)
+
+			body, _ := json.Marshal(tt.request)
+			req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+
+			if w.Code != http.StatusCreated {
+				t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+			}
+
+			var resp map[string]any
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if got := resp["application_type"]; got != tt.want {
+				t.Errorf("response application_type = %v, want %q", got, tt.want)
+			}
+
+			stored, err := st.GetClient(context.Background(), resp["client_id"].(string))
+			if err != nil {
+				t.Fatalf("GetClient: %v", err)
+			}
+			if stored == nil {
+				t.Fatal("expected client to be stored, got nil")
+			}
+			if stored.ApplicationType != tt.want {
+				t.Errorf("stored ApplicationType = %q, want %q", stored.ApplicationType, tt.want)
+			}
+		})
+	}
+}
