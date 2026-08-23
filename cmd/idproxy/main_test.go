@@ -35,7 +35,7 @@ func TestHealthzHandler(t *testing.T) {
 }
 
 func TestNewReverseProxy(t *testing.T) {
-	proxy, err := newReverseProxy("http://localhost:3000")
+	proxy, err := newReverseProxy("http://localhost:3000", "")
 	if err != nil {
 		t.Fatalf("newReverseProxy() error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestNewReverseProxy(t *testing.T) {
 }
 
 func TestNewReverseProxy_InvalidURL(t *testing.T) {
-	_, err := newReverseProxy("://invalid")
+	_, err := newReverseProxy("://invalid", "")
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
 	}
@@ -207,7 +207,7 @@ func TestPrintUsage(t *testing.T) {
 	defer flag.CommandLine.SetOutput(os.Stderr)
 	printUsage()
 	output := buf.String()
-	for _, want := range []string{"UPSTREAM_URL", "EXTERNAL_URL", "COOKIE_SECRET", "OIDC_ISSUER", "OIDC_CLIENT_ID", "Environment Variables"} {
+	for _, want := range []string{"UPSTREAM_URL", "EXTERNAL_URL", "COOKIE_SECRET", "OIDC_ISSUER", "OIDC_CLIENT_ID", "UPSTREAM_AUTH_TOKEN", "Environment Variables"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("expected %q in usage output", want)
 		}
