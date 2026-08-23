@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -78,8 +79,43 @@ func runServe() error {
 	return srv.Shutdown(shutdownCtx)
 }
 
+// parseUpstream は UPSTREAM_URL を解釈し、プロキシ先 URL と、Unix domain socket
+// 指定（unix:///path/to/backend.sock）のときはそのソケットパスを返す。
+// TCP 指定のときソケットパスは空文字列になる。
+//
+// unix:// のときの target はダミーの http://unix を返す。Host が空のままだと
+// Rewrite の SetURL が壊れるため、必ずホスト名を置く必要がある。実際の接続先は
+// Transport.DialContext がソケットパスから決めるため、この値は使われない。
+func parseUpstream(raw string) (*url.URL, string, error) {
+	target, err := url.Parse(raw)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid upstream URL: %w", err)
+	}
+	if target.Scheme != "unix" {
+		return target, "", nil
+	}
+
+	// unix://relative/backend.sock は Host が "relative" になる（相対パス指定）。
+	if target.Host != "" {
+		return nil, "", fmt.Errorf("invalid upstream URL: unix:// requires an absolute socket path, got relative %q (use unix:///path/to/backend.sock)", target.Host+target.Path)
+	}
+	socketPath := target.Path
+	if socketPath == "" {
+		return nil, "", fmt.Errorf("invalid upstream URL: unix:// requires a socket path (use unix:///path/to/backend.sock)")
+	}
+	if !filepath.IsAbs(socketPath) {
+		return nil, "", fmt.Errorf("invalid upstream URL: unix:// socket path must be absolute, got %q", socketPath)
+	}
+
+	return &url.URL{Scheme: "http", Host: "unix"}, socketPath, nil
+}
+
 // newReverseProxy は upstream URL へのリバースプロキシを生成する。
 // FlushInterval: -1 を設定し、SSE 透過を有効にする。
+//
+// upstream が unix:// の場合は Transport.DialContext を UDS dial へ差し替える。
+// Rewrite は TCP と共有し、UDS 用に分岐させない（pr.Out.Host = pr.In.Host に
+// より、ダミーの "unix" ホスト名は upstream の Host ヘッダーに現れない）。
 //
 // authToken が空でない場合、upstream へのリクエストに
 // Authorization: Bearer <authToken> を注入する。クライアント由来の
@@ -89,9 +125,9 @@ func runServe() error {
 // Connection: Authorization を送ると注入したヘッダーごと落ちるため
 // （golang/go#50580）。
 func newReverseProxy(upstream, authToken string) (*httputil.ReverseProxy, error) {
-	target, err := url.Parse(upstream)
+	target, socketPath, err := parseUpstream(upstream)
 	if err != nil {
-		return nil, fmt.Errorf("invalid upstream URL: %w", err)
+		return nil, err
 	}
 	proxy := &httputil.ReverseProxy{
 		FlushInterval: -1, // SSE 透過のため即時 flush
@@ -106,6 +142,16 @@ func newReverseProxy(upstream, authToken string) (*httputil.ReverseProxy, error)
 				pr.Out.Header.Set("Authorization", "Bearer "+authToken)
 			}
 		},
+	}
+
+	if socketPath != "" {
+		// 既定 Transport の Clone をベースにするのは、タイムアウトや
+		// コネクション上限といった既定値を落とさないため。
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		}
+		proxy.Transport = transport
 	}
 
 	return proxy, nil
