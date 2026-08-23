@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
@@ -1275,6 +1276,295 @@ func TestIntegration_MCPOAuthFullFlow(t *testing.T) {
 	}
 	if calls[0].Name != "echo" {
 		t.Fatalf("expected tool call name=echo, got %s", calls[0].Name)
+	}
+}
+
+// --- E2E 7: stateless Streamable HTTP 透過性（#32c） ---
+
+// newTransparentReverseProxy は cmd/idproxy.newReverseProxy と同じ透過性契約
+// （Director を使わず Rewrite フックのみを設定し、FlushInterval: -1 で SSE/POST
+// ストリームを即時 flush する）で target への httputil.ReverseProxy を構築する。
+// cmd/idproxy は package main のためこのパッケージから直接呼べないが、本番の
+// Rewrite 移行（S4）で確立された「Director を設定しない」「Host を inbound の
+// 値へ明示的に保持する」という契約を複製することで、認証層（auth.Wrap）と
+// 組み合わせた際のヘッダー・ストリーム透過性を実経路に近い形で検証する。
+func newTransparentReverseProxy(target *url.URL) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		FlushInterval: -1,
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.Out.Host = pr.In.Host
+		},
+	}
+}
+
+// setupAuthenticatedMCPProxy は mockMCP を upstream とする auth.Wrap 済みリバース
+// プロキシサーバーを構築し、ブラウザ認証 → DCR → PKCE authorize → token exchange
+// の OAuth 2.1 フルフローを実行して得た access token を返す。S6 の透過性回帰
+// テストが「認証を通過した実際の経路」で成立することを確認するために使う。
+func setupAuthenticatedMCPProxy(t *testing.T, mockMCP *testutil.MockMCP) (authSrv *httptest.Server, accessToken string) {
+	t.Helper()
+
+	mockIdP := testutil.NewMockIdP(t)
+	memStore := idpstore.NewMemoryStore()
+	t.Cleanup(func() { _ = memStore.Close() })
+
+	signingKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate signing key: %v", err)
+	}
+
+	cfg := idproxy.Config{
+		Providers: []idproxy.OIDCProvider{
+			{
+				Issuer:       mockIdP.Issuer(),
+				ClientID:     "test-client",
+				ClientSecret: "test-secret",
+			},
+		},
+		ExternalURL:  "http://localhost:0",
+		CookieSecret: cookieSecret,
+		Store:        memStore,
+		OAuth: &idproxy.OAuthConfig{
+			SigningKey:          signingKey,
+			AllowedRedirectURIs: []string{},
+		},
+	}
+
+	dummyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	authSrv = httptest.NewServer(dummyHandler)
+	t.Cleanup(authSrv.Close)
+
+	cfg.ExternalURL = authSrv.URL
+	cfg.OAuth.AllowedRedirectURIs = []string{
+		authSrv.URL + "/callback",
+		"http://localhost:9999/callback",
+	}
+
+	ctx := context.Background()
+	auth, err := idproxy.New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("failed to create auth: %v", err)
+	}
+
+	mcpTarget, err := url.Parse(mockMCP.URL())
+	if err != nil {
+		t.Fatalf("failed to parse mock MCP URL: %v", err)
+	}
+	authSrv.Config.Handler = auth.Wrap(newTransparentReverseProxy(mcpTarget))
+
+	// ブラウザ認証でセッション Cookie 取得
+	cookies := performBrowserLogin(t, authSrv, mockIdP)
+	client := newNoRedirectClient()
+
+	// DCR
+	dcrBody := `{"redirect_uris": ["http://localhost:9999/callback"], "client_name": "mcp-transparency-test"}`
+	resp, err := client.Post(authSrv.URL+"/register", "application/json", strings.NewReader(dcrBody))
+	if err != nil {
+		t.Fatalf("failed POST /register: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 201 for /register, got %d: %s", resp.StatusCode, string(body))
+	}
+	var dcrResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err != nil {
+		t.Fatalf("failed to decode DCR response: %v", err)
+	}
+	clientID, _ := dcrResp["client_id"].(string)
+	if clientID == "" {
+		t.Fatal("expected client_id in DCR response")
+	}
+
+	// PKCE authorize
+	codeVerifier := "test-code-verifier-that-is-long-enough-for-pkce-validation"
+	codeChallenge := idproxy.S256Challenge(codeVerifier)
+	authorizeURL := fmt.Sprintf(
+		"%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256&state=mcp-transparency-state&scope=openid+email",
+		authSrv.URL,
+		clientID,
+		url.QueryEscape("http://localhost:9999/callback"),
+		codeChallenge,
+	)
+	req, _ := http.NewRequest("GET", authorizeURL, nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("failed GET /authorize: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("expected 302 from /authorize, got %d", resp.StatusCode)
+	}
+	redirectLocation := resp.Header.Get("Location")
+	parsedRedirect, err := url.Parse(redirectLocation)
+	if err != nil {
+		t.Fatalf("failed to parse redirect location: %v", err)
+	}
+	authCode := parsedRedirect.Query().Get("code")
+	if authCode == "" {
+		t.Fatal("expected code in redirect from /authorize")
+	}
+
+	// token exchange
+	tokenForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {authCode},
+		"redirect_uri":  {"http://localhost:9999/callback"},
+		"client_id":     {clientID},
+		"code_verifier": {codeVerifier},
+	}
+	resp, err = client.PostForm(authSrv.URL+"/token", tokenForm)
+	if err != nil {
+		t.Fatalf("failed POST /token: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 for /token, got %d: %s", resp.StatusCode, string(body))
+	}
+	var tokenResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		t.Fatalf("failed to decode token response: %v", err)
+	}
+	token, ok := tokenResp["access_token"].(string)
+	if !ok || token == "" {
+		t.Fatal("expected access_token in token response")
+	}
+
+	return authSrv, token
+}
+
+// TestIntegration_StreamablePOSTFlushThrough は POST 応答の長寿命ストリーム
+// （subscriptions/listen 相当）が upstream から書かれる端からクライアントへ
+// flush-through されることを検証する（#32c）。GET SSE 前提の実装だと POST
+// レスポンスがバッファされてしまう回帰を防ぐ。
+//
+// 判定は到着間隔の計測ではなく StreamController による同期で行う: upstream
+// （MockMCP）は最初のチャンクを flush した直後、テストが Proceed() を呼ぶまで
+// 残りのチャンクを書かずにブロックする。プロキシがレスポンスをバッファしていれば
+// クライアントは最初のチャンクを読めず、テストはタイムアウトで失敗する。
+func TestIntegration_StreamablePOSTFlushThrough(t *testing.T) {
+	mockMCP := testutil.NewMockMCP(t)
+	ctrl := testutil.NewStreamController()
+	mockMCP.SetStreamChunks([]string{
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{"chunk":1}}`,
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{"chunk":2}}`,
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{"chunk":3}}`,
+	}, ctrl)
+
+	authSrv, accessToken := setupAuthenticatedMCPProxy(t, mockMCP)
+
+	req, err := http.NewRequest("POST", authSrv.URL+"/stream", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen"}`))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("failed POST /stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 for /stream, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	lineCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		lineCh <- line
+	}()
+
+	select {
+	case line := <-lineCh:
+		if !strings.Contains(line, `"chunk":1`) {
+			t.Fatalf("expected first chunk, got %q", line)
+		}
+	case err := <-errCh:
+		t.Fatalf("failed to read first chunk: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for first chunk — response may be buffered instead of flushed through")
+	}
+
+	// 最初のチャンクを既に受信した後で Proceed する。upstream はここまで
+	// ブロックされたままだったので、これより前にクライアントが読めた時点で
+	// バッファリングされていないことが証明されている。
+	ctrl.Proceed()
+
+	remaining, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("failed to read remaining stream: %v", err)
+	}
+	if !strings.Contains(string(remaining), `"chunk":2`) || !strings.Contains(string(remaining), `"chunk":3`) {
+		t.Fatalf("expected remaining chunks 2 and 3, got %q", string(remaining))
+	}
+}
+
+// TestIntegration_MCPHeadersPassthrough は MCP spec 2026-07-28 で POST に必須と
+// なった Mcp-Method / Mcp-Name ヘッダー、SEP-2243 の x-mcp-header カスタム
+// ヘッダー、および（プロトコルレベルの session が廃止された今も送られうる）
+// Mcp-Session-Id が、認証通過後の POST で upstream にそのまま到達することを
+// 検証する（#32c）。
+func TestIntegration_MCPHeadersPassthrough(t *testing.T) {
+	mockMCP := testutil.NewMockMCP(t)
+	mockMCP.SetStreamChunks([]string{
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{"chunk":1}}`,
+	}, nil)
+
+	authSrv, accessToken := setupAuthenticatedMCPProxy(t, mockMCP)
+
+	req, err := http.NewRequest("POST", authSrv.URL+"/stream", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen"}`))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Method", "subscriptions/listen")
+	req.Header.Set("Mcp-Name", "focal")
+	req.Header.Set("x-mcp-header", "custom-value")
+	req.Header.Set("Mcp-Session-Id", "session-passthrough-test")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("failed POST /stream: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for /stream, got %d", resp.StatusCode)
+	}
+
+	got := mockMCP.LastStreamHeaders()
+	if got == nil {
+		t.Fatal("expected upstream to have received the /stream request")
+	}
+
+	want := map[string]string{
+		"Mcp-Method":     "subscriptions/listen",
+		"Mcp-Name":       "focal",
+		"X-Mcp-Header":   "custom-value", // net/http がヘッダー名を正規化する
+		"Mcp-Session-Id": "session-passthrough-test",
+	}
+	for name, wantVal := range want {
+		if gotVal := got.Get(name); gotVal != wantVal {
+			t.Errorf("header %s: expected %q, got %q", name, wantVal, gotVal)
+		}
 	}
 }
 
