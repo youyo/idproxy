@@ -138,7 +138,7 @@ func (a *Auth) Wrap(next http.Handler) http.Handler {
 		if token := extractBearerToken(r); token != "" {
 			if a.bearerValidator == nil {
 				a.logger.Debug("bearer token received but OAuth is not configured")
-				w.Header().Set("WWW-Authenticate", `Bearer realm="idproxy", error="invalid_token", error_description="OAuth is not configured"`)
+				w.Header().Set("WWW-Authenticate", a.bearerChallenge(`error="invalid_token"`, `error_description="OAuth is not configured"`))
 				http.Error(w, "OAuth is not configured", http.StatusUnauthorized)
 				return
 			}
@@ -146,7 +146,7 @@ func (a *Auth) Wrap(next http.Handler) http.Handler {
 			user, err := a.bearerValidator.Validate(r.Context(), token)
 			if err != nil {
 				a.logger.Debug("bearer token validation failed", "error", err)
-				w.Header().Set("WWW-Authenticate", `Bearer realm="idproxy", error="invalid_token"`)
+				w.Header().Set("WWW-Authenticate", a.bearerChallenge(`error="invalid_token"`))
 				http.Error(w, "invalid bearer token", http.StatusUnauthorized)
 				return
 			}
@@ -215,9 +215,35 @@ func (a *Auth) isOAuthASPath(path string) bool {
 		}
 	}
 
+	// Protected Resource Metadata（RFC 9728）は resource identifier の直下に置くため、
+	// PathPrefix が非空のときは prefix の外側に出る。この 1 経路だけ個別に許可する。
+	if path == protectedResourceMetadataPath {
+		return true
+	}
+
 	// /.well-known/ プレフィックスのパス
 	wellKnownPrefix := prefix + "/.well-known/"
 	return strings.HasPrefix(path, wellKnownPrefix)
+}
+
+// bearerChallenge は 401 応答の WWW-Authenticate ヘッダー値（Bearer チャレンジ）を組み立てる。
+// params は `error="invalid_token"` のような key="value" 形式の追加パラメータ。
+// OAuth 2.1 AS が設定されている構成でのみ、RFC 9728 の resource_metadata パラメータで
+// Protected Resource Metadata の URL を広告する（未設定なら広告しない）。
+func (a *Auth) bearerChallenge(params ...string) string {
+	parts := make([]string, 0, len(params)+2)
+	parts = append(parts, `realm="idproxy"`)
+	parts = append(parts, params...)
+	if a.oauthServer != nil {
+		parts = append(parts, `resource_metadata="`+a.protectedResourceMetadataURL()+`"`)
+	}
+	return "Bearer " + strings.Join(parts, ", ")
+}
+
+// protectedResourceMetadataURL は Protected Resource Metadata の絶対 URL を返す。
+// RFC 9728 の well-known 構築規則に従い、PathPrefix には依存しない。
+func (a *Auth) protectedResourceMetadataURL() string {
+	return strings.TrimRight(a.config.ExternalURL, "/") + protectedResourceMetadataPath
 }
 
 // handleUnauthenticated は未認証リクエストに対して
@@ -249,6 +275,7 @@ func (a *Auth) handleUnauthenticated(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// API リクエスト: 401
+	w.Header().Set("WWW-Authenticate", a.bearerChallenge())
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
