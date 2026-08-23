@@ -17,15 +17,18 @@ func TestParseConfig_AllRequired(t *testing.T) {
 		"OIDC_CLIENT_SECRET": "test-client-secret",
 	})
 
-	cfg, upstream, listenAddr, err := parseConfig()
+	cfg, pc, err := parseConfig()
 	if err != nil {
 		t.Fatalf("parseConfig() error: %v", err)
 	}
-	if upstream != "http://localhost:3000" {
-		t.Errorf("upstream = %q, want %q", upstream, "http://localhost:3000")
+	if pc.upstream != "http://localhost:3000" {
+		t.Errorf("upstream = %q, want %q", pc.upstream, "http://localhost:3000")
 	}
-	if listenAddr != ":8080" {
-		t.Errorf("listenAddr = %q, want %q", listenAddr, ":8080")
+	if pc.listenAddr != ":8080" {
+		t.Errorf("listenAddr = %q, want %q", pc.listenAddr, ":8080")
+	}
+	if pc.upstreamAuthToken != "" {
+		t.Errorf("upstreamAuthToken = %q, want empty", pc.upstreamAuthToken)
 	}
 	if cfg.ExternalURL != "https://mcp.example.com" {
 		t.Errorf("ExternalURL = %q, want %q", cfg.ExternalURL, "https://mcp.example.com")
@@ -55,7 +58,7 @@ func TestParseConfig_MultipleProviders(t *testing.T) {
 		"OIDC_CLIENT_SECRET": "google-secret,azure-secret",
 	})
 
-	cfg, _, _, err := parseConfig()
+	cfg, _, err := parseConfig()
 	if err != nil {
 		t.Fatalf("parseConfig() error: %v", err)
 	}
@@ -117,7 +120,7 @@ func TestParseConfig_MissingRequired(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setEnvs(t, tt.envs)
-			_, _, _, err := parseConfig()
+			_, _, err := parseConfig()
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -139,7 +142,7 @@ func TestParseConfig_ProviderCountMismatch(t *testing.T) {
 		"OIDC_CLIENT_SECRET": "secret-a,secret-b",
 	})
 
-	_, _, _, err := parseConfig()
+	_, _, err := parseConfig()
 	if err == nil {
 		t.Fatal("expected error for mismatched provider count")
 	}
@@ -157,12 +160,32 @@ func TestParseConfig_CustomPort(t *testing.T) {
 		"PORT":              "9090",
 	})
 
-	_, _, listenAddr, err := parseConfig()
+	_, pc, err := parseConfig()
 	if err != nil {
 		t.Fatalf("parseConfig() error: %v", err)
 	}
-	if listenAddr != ":9090" {
-		t.Errorf("listenAddr = %q, want %q", listenAddr, ":9090")
+	if pc.listenAddr != ":9090" {
+		t.Errorf("listenAddr = %q, want %q", pc.listenAddr, ":9090")
+	}
+}
+
+func TestParseConfig_UpstreamAuthToken(t *testing.T) {
+	secret := hex.EncodeToString(make([]byte, 32))
+	setEnvs(t, map[string]string{
+		"UPSTREAM_URL":        "http://localhost:3000",
+		"EXTERNAL_URL":        "https://mcp.example.com",
+		"COOKIE_SECRET":       secret,
+		"OIDC_ISSUER":         "https://accounts.google.com",
+		"OIDC_CLIENT_ID":      "test-id",
+		"UPSTREAM_AUTH_TOKEN": "upstream-secret",
+	})
+
+	_, pc, err := parseConfig()
+	if err != nil {
+		t.Fatalf("parseConfig() error: %v", err)
+	}
+	if pc.upstreamAuthToken != "upstream-secret" {
+		t.Errorf("upstreamAuthToken = %q, want %q", pc.upstreamAuthToken, "upstream-secret")
 	}
 }
 
@@ -181,7 +204,7 @@ func TestParseConfig_OptionalFields(t *testing.T) {
 		"OIDC_PROVIDER_NAME": "Google",
 	})
 
-	cfg, _, _, err := parseConfig()
+	cfg, _, err := parseConfig()
 	if err != nil {
 		t.Fatalf("parseConfig() error: %v", err)
 	}
@@ -212,7 +235,7 @@ func TestParseConfig_InvalidCookieSecret(t *testing.T) {
 		"OIDC_CLIENT_SECRET": "test-secret",
 	})
 
-	_, _, _, err := parseConfig()
+	_, _, err := parseConfig()
 	if err == nil {
 		t.Fatal("expected error for invalid COOKIE_SECRET")
 	}
@@ -231,7 +254,7 @@ func TestParseConfig_OAuthFields(t *testing.T) {
 		"OAUTH_ALLOWED_REDIRECT_URIS": "http://localhost:3000/callback,http://localhost:4000/callback",
 	})
 
-	cfg, _, _, err := parseConfig()
+	cfg, _, err := parseConfig()
 	if err != nil {
 		t.Fatalf("parseConfig() error: %v", err)
 	}
@@ -250,7 +273,7 @@ func setEnvs(t *testing.T, envs map[string]string) {
 	allKeys := []string{
 		"UPSTREAM_URL", "EXTERNAL_URL", "PATH_PREFIX", "COOKIE_SECRET",
 		"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_PROVIDER_NAME",
-		"ALLOWED_DOMAINS", "ALLOWED_EMAILS", "PORT",
+		"ALLOWED_DOMAINS", "ALLOWED_EMAILS", "PORT", "UPSTREAM_AUTH_TOKEN",
 		"OAUTH_CLIENT_ID", "OAUTH_ALLOWED_REDIRECT_URIS",
 		"STORE_BACKEND",
 		"DYNAMODB_TABLE_NAME", "AWS_REGION",
