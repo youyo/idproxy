@@ -2,12 +2,16 @@ package idproxy
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +27,15 @@ import (
 //   - AuthCodeData.CodeChallenge → nonce
 //   - AuthCodeData.CodeChallengeMethod → provider の Issuer URL
 //   - AuthCodeData.ClientID    → "browser-auth-state"（識別用マーカー）
+//   - AuthCodeData.Scopes[0]   → binder Cookie の SHA-256 ハッシュ(hex)
 const browserAuthStateMarker = "browser-auth-state"
+
+// loginStateCookieName はブラウザ認証フローを開始したブラウザに state を
+// 束縛するための一時 Cookie の名前(login CSRF 対策)。
+const loginStateCookieName = "_idproxy_login_state"
+
+// loginStateTTL は state エントリと binder Cookie の有効期間。
+const loginStateTTL = 10 * time.Minute
 
 // BrowserAuth はブラウザベースの OIDC 認証フローを処理する。
 // LoginHandler で IdP へのリダイレクトを行い、
@@ -135,6 +147,14 @@ func (ba *BrowserAuth) LoginHandler() http.Handler {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
+		// binder は state をこのブラウザに束縛するためのシークレット(login CSRF 対策)。
+		// Cookie に生値、Store にはハッシュのみを保存する。
+		binder, err := generateRandomHex(32)
+		if err != nil {
+			ba.logger.Error("failed to generate login state binder", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 
 		// 元の URL を取得（クエリ指定 → Config.DefaultPostLoginPath → "/" の順）
 		redirectTo := r.URL.Query().Get("redirect_to")
@@ -165,14 +185,18 @@ func (ba *BrowserAuth) LoginHandler() http.Handler {
 			RedirectURI:         redirectTo,
 			CodeChallenge:       nonce,
 			CodeChallengeMethod: issuer,
+			Scopes:              []string{hashLoginBinder(binder)},
 			CreatedAt:           time.Now(),
-			ExpiresAt:           time.Now().Add(10 * time.Minute),
+			ExpiresAt:           time.Now().Add(loginStateTTL),
 		}
-		if err := ba.store.SetAuthCode(ctx, state, stateData, 10*time.Minute); err != nil {
+		if err := ba.store.SetAuthCode(ctx, state, stateData, loginStateTTL); err != nil {
 			ba.logger.Error("failed to store state", "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
+
+		// binder Cookie を発行(state と同じ TTL)
+		http.SetCookie(w, ba.sm.newNamedCookie(loginStateCookieName, binder, int(loginStateTTL.Seconds())))
 
 		// IdP にリダイレクト
 		authURL := oauth2Cfg.AuthCodeURL(state,
@@ -226,6 +250,18 @@ func (ba *BrowserAuth) CallbackHandler() http.Handler {
 			return
 		}
 
+		// binder Cookie が state エントリと一致するかを、state を消費する前に検証する。
+		// 一致しない場合、この /callback は state を発行したブラウザからのものではない
+		// (攻撃者が自分のログインを被害者に踏ませる login CSRF)。
+		// 成否にかかわらず binder Cookie は失効させる。
+		binderMatched := loginBinderMatches(r, stateData)
+		http.SetCookie(w, ba.sm.newNamedCookie(loginStateCookieName, "", -1))
+		if !binderMatched {
+			ba.logger.Warn("login state binder mismatch", "issuer", stateData.CodeChallengeMethod)
+			http.Error(w, "invalid or expired state", http.StatusBadRequest)
+			return
+		}
+
 		// state を削除（使い捨て）
 		_ = ba.store.DeleteAuthCode(ctx, state)
 
@@ -272,22 +308,22 @@ func (ba *BrowserAuth) CallbackHandler() http.Handler {
 			return
 		}
 
-		// nonce 検証
+		// nonce 検証。
+		// nonce はフロー毎の anti-replay シークレットであり、received 側は
+		// 未認証の呼び出し元が任意の値・任意の量を注入できるため、いずれもログに残さない。
 		if idToken.Nonce != nonce {
-			ba.logger.Error("nonce mismatch",
-				"expected", nonce,
-				"got", idToken.Nonce,
-			)
+			ba.logger.Error("nonce mismatch", "issuer", issuer)
 			http.Error(w, "nonce mismatch", http.StatusBadRequest)
 			return
 		}
 
 		// クレームを抽出
 		var claims struct {
-			Email           string `json:"email"`
-			Name            string `json:"name"`
-			CognitoUsername string `json:"cognito:username"`
-			PreferredName   string `json:"preferred_username"`
+			Email           string             `json:"email"`
+			EmailVerified   emailVerifiedClaim `json:"email_verified"`
+			Name            string             `json:"name"`
+			CognitoUsername string             `json:"cognito:username"`
+			PreferredName   string             `json:"preferred_username"`
 		}
 		if err := idToken.Claims(&claims); err != nil {
 			ba.logger.Error("failed to extract claims", "error", err)
@@ -302,6 +338,20 @@ func (ba *BrowserAuth) CallbackHandler() http.Handler {
 			} else if claims.PreferredName != "" {
 				claims.Name = claims.PreferredName
 			}
+		}
+
+		// email ベースの認可を行う場合、IdP が email を検証済みと表明していなければ拒否する。
+		// email が self-asserted な IdP（Cognito のセルフサインアップ、マルチテナントの
+		// Entra ID アプリ等）では、未検証の email を許容すると AllowedDomains /
+		// AllowedEmails を素通りされるため。クレーム欠落は「未検証」として扱う（fail closed）。
+		if ba.emailAuthorizationEnabled() && !claims.EmailVerified.Bool() {
+			ba.logger.Warn("email not verified by IdP",
+				"email", claims.Email,
+				"issuer", idToken.Issuer,
+				"subject", idToken.Subject,
+			)
+			http.Error(w, "email not authorized", http.StatusForbidden)
+			return
 		}
 
 		// AllowedDomains / AllowedEmails 認可判定
@@ -481,6 +531,42 @@ func (ba *BrowserAuth) SelectionHandler() http.Handler {
 	})
 }
 
+// emailVerifiedClaim は ID Token の `email_verified` クレームを表す bool 型。
+//
+// OIDC Core は boolean を規定しているが、Cognito や一部の Entra ID 構成は
+// 文字列 `"true"` / `"false"` を返すため、その両方を受け付ける。
+// それ以外の型・値（null・数値・パース不能な文字列）はすべて「未検証」
+// として扱う（fail closed）。クレーム自体が存在しない場合はゼロ値 false になる。
+type emailVerifiedClaim bool
+
+// Bool は email が IdP により検証済みかどうかを返す。
+func (c emailVerifiedClaim) Bool() bool { return bool(c) }
+
+// UnmarshalJSON は boolean と文字列表現の双方を受け付ける。
+// 想定外の入力ではエラーを返さず false（未検証）にフォールバックし、
+// 他クレームの抽出を巻き添えで失敗させない。
+func (c *emailVerifiedClaim) UnmarshalJSON(data []byte) error {
+	var asBool bool
+	if err := json.Unmarshal(data, &asBool); err == nil {
+		*c = emailVerifiedClaim(asBool)
+		return nil
+	}
+	var asString string
+	if err := json.Unmarshal(data, &asString); err == nil {
+		parsed, perr := strconv.ParseBool(asString)
+		*c = emailVerifiedClaim(perr == nil && parsed)
+		return nil
+	}
+	*c = false
+	return nil
+}
+
+// emailAuthorizationEnabled は AllowedDomains / AllowedEmails による
+// email ベースの認可が有効かどうかを返す。
+func (ba *BrowserAuth) emailAuthorizationEnabled() bool {
+	return len(ba.allowedDomains) > 0 || len(ba.allowedEmails) > 0
+}
+
 // isEmailAuthorized はメールアドレスが AllowedDomains / AllowedEmails で許可されているかを判定する。
 // AllowedDomains と AllowedEmails の両方が空の場合は全てのメールを許可する。
 // AllowedDomains と AllowedEmails は OR 条件で評価される。
@@ -515,6 +601,29 @@ func isEmailAuthorized(email string, allowedDomains, allowedEmails []string) boo
 	}
 
 	return false
+}
+
+// hashLoginBinder は binder の SHA-256 ハッシュを hex で返す。
+// Store には生値を保存せず、このハッシュのみを保存する。
+func hashLoginBinder(binder string) string {
+	sum := sha256.Sum256([]byte(binder))
+	return hex.EncodeToString(sum[:])
+}
+
+// loginBinderMatches はリクエストの binder Cookie が state エントリに記録された
+// ハッシュと一致するかを定数時間で判定する。Cookie 欠落・記録なしは不一致扱い。
+func loginBinderMatches(r *http.Request, stateData *AuthCodeData) bool {
+	if len(stateData.Scopes) == 0 || stateData.Scopes[0] == "" {
+		return false
+	}
+	cookie, err := r.Cookie(loginStateCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare(
+		[]byte(stateData.Scopes[0]),
+		[]byte(hashLoginBinder(cookie.Value)),
+	) == 1
 }
 
 // generateRandomHex は暗号論的乱数で n バイトの乱数を生成し、hex エンコードした文字列を返す。

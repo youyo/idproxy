@@ -1111,3 +1111,213 @@ func TestMemoryStore_Cleanup_OnlyValid(t *testing.T) {
 		}
 	}
 }
+
+// TestMemoryStore_GettersReturnDefensiveCopies は Get* が格納中のポインタを
+// そのまま返さないことを検証する。
+// 返り値を書き換えてもストア側の状態が変化してはならない。
+func TestMemoryStore_GettersReturnDefensiveCopies(t *testing.T) {
+	ctx := context.Background()
+	m := newMemoryStoreWithInterval(0)
+	defer func() { _ = m.Close() }()
+
+	t.Run("AuthCode", func(t *testing.T) {
+		data := &idproxy.AuthCodeData{
+			Code:   "code-copy",
+			Scopes: []string{"openid"},
+			User:   &idproxy.User{Email: "a@example.com", Claims: map[string]interface{}{"sub": "s1"}},
+		}
+		if err := m.SetAuthCode(ctx, "code-copy", data, time.Minute); err != nil {
+			t.Fatalf("SetAuthCode() error = %v", err)
+		}
+		// Set 後に引数を書き換えてもストアに波及しない
+		data.Used = true
+
+		got1, err := m.GetAuthCode(ctx, "code-copy")
+		if err != nil {
+			t.Fatalf("GetAuthCode() error = %v", err)
+		}
+		if got1.Used {
+			t.Error("SetAuthCode() が引数を複製していない: Used が波及した")
+		}
+		got1.Used = true
+		got1.Scopes[0] = "mutated"
+		got1.User.Email = "mutated@example.com"
+		got1.User.Claims["sub"] = "mutated"
+
+		got2, err := m.GetAuthCode(ctx, "code-copy")
+		if err != nil {
+			t.Fatalf("GetAuthCode() error = %v", err)
+		}
+		if got2.Used {
+			t.Error("GetAuthCode() が live ポインタを返している: Used が波及した")
+		}
+		if got2.Scopes[0] != "openid" {
+			t.Errorf("Scopes が共有されている: got %q", got2.Scopes[0])
+		}
+		if got2.User.Email != "a@example.com" {
+			t.Errorf("User が共有されている: got %q", got2.User.Email)
+		}
+		if got2.User.Claims["sub"] != "s1" {
+			t.Errorf("Claims が共有されている: got %v", got2.User.Claims["sub"])
+		}
+	})
+
+	t.Run("Client", func(t *testing.T) {
+		data := &idproxy.ClientData{
+			ClientID:     "client-copy",
+			RedirectURIs: []string{"https://app.example.com/callback"},
+		}
+		if err := m.SetClient(ctx, "client-copy", data); err != nil {
+			t.Fatalf("SetClient() error = %v", err)
+		}
+		data.RedirectURIs[0] = "https://evil.example.com/callback"
+
+		got1, err := m.GetClient(ctx, "client-copy")
+		if err != nil {
+			t.Fatalf("GetClient() error = %v", err)
+		}
+		if got1.RedirectURIs[0] != "https://app.example.com/callback" {
+			t.Errorf("SetClient() が引数を複製していない: got %q", got1.RedirectURIs[0])
+		}
+		got1.RedirectURIs[0] = "https://evil.example.com/callback"
+
+		got2, err := m.GetClient(ctx, "client-copy")
+		if err != nil {
+			t.Fatalf("GetClient() error = %v", err)
+		}
+		if got2.RedirectURIs[0] != "https://app.example.com/callback" {
+			t.Errorf("GetClient() が live ポインタを返している: got %q", got2.RedirectURIs[0])
+		}
+	})
+
+	t.Run("Session", func(t *testing.T) {
+		if err := m.SetSession(ctx, "sess-copy", &idproxy.Session{
+			ID:   "sess-copy",
+			User: &idproxy.User{Email: "a@example.com"},
+		}, time.Minute); err != nil {
+			t.Fatalf("SetSession() error = %v", err)
+		}
+		got1, err := m.GetSession(ctx, "sess-copy")
+		if err != nil {
+			t.Fatalf("GetSession() error = %v", err)
+		}
+		got1.User.Email = "mutated@example.com"
+
+		got2, err := m.GetSession(ctx, "sess-copy")
+		if err != nil {
+			t.Fatalf("GetSession() error = %v", err)
+		}
+		if got2.User.Email != "a@example.com" {
+			t.Errorf("GetSession() が live ポインタを返している: got %q", got2.User.Email)
+		}
+	})
+
+	t.Run("AccessToken", func(t *testing.T) {
+		if err := m.SetAccessToken(ctx, "jti-copy", &idproxy.AccessTokenData{
+			JTI:    "jti-copy",
+			Scopes: []string{"openid"},
+		}, time.Minute); err != nil {
+			t.Fatalf("SetAccessToken() error = %v", err)
+		}
+		got1, err := m.GetAccessToken(ctx, "jti-copy")
+		if err != nil {
+			t.Fatalf("GetAccessToken() error = %v", err)
+		}
+		got1.Revoked = true
+		got1.Scopes[0] = "mutated"
+
+		got2, err := m.GetAccessToken(ctx, "jti-copy")
+		if err != nil {
+			t.Fatalf("GetAccessToken() error = %v", err)
+		}
+		if got2.Revoked || got2.Scopes[0] != "openid" {
+			t.Errorf("GetAccessToken() が live ポインタを返している: Revoked=%v Scopes=%v", got2.Revoked, got2.Scopes)
+		}
+	})
+
+	t.Run("RefreshToken", func(t *testing.T) {
+		if err := m.SetRefreshToken(ctx, "rt-copy", &idproxy.RefreshTokenData{
+			ID:     "rt-copy",
+			Scopes: []string{"openid"},
+		}, time.Minute); err != nil {
+			t.Fatalf("SetRefreshToken() error = %v", err)
+		}
+		got1, err := m.GetRefreshToken(ctx, "rt-copy")
+		if err != nil {
+			t.Fatalf("GetRefreshToken() error = %v", err)
+		}
+		got1.Used = true
+		got1.Scopes[0] = "mutated"
+
+		got2, err := m.GetRefreshToken(ctx, "rt-copy")
+		if err != nil {
+			t.Fatalf("GetRefreshToken() error = %v", err)
+		}
+		if got2.Used || got2.Scopes[0] != "openid" {
+			t.Errorf("GetRefreshToken() が live ポインタを返している: Used=%v Scopes=%v", got2.Used, got2.Scopes)
+		}
+	})
+}
+
+// TestMemoryStore_ConcurrentGetAndMutate は Get* の返り値を書き換える
+// 呼び出し側と、並行する Get*/Consume との間にデータ競合が無いことを検証する。
+// 防御的コピーが無い場合、-race で必ず失敗する。
+func TestMemoryStore_ConcurrentGetAndMutate(t *testing.T) {
+	ctx := context.Background()
+	m := newMemoryStoreWithInterval(0)
+	defer func() { _ = m.Close() }()
+
+	if err := m.SetAuthCode(ctx, "race-code", &idproxy.AuthCodeData{
+		Code:   "race-code",
+		Scopes: []string{"openid"},
+		User:   &idproxy.User{Email: "a@example.com"},
+	}, time.Minute); err != nil {
+		t.Fatalf("SetAuthCode() error = %v", err)
+	}
+	if err := m.SetRefreshToken(ctx, "race-rt", &idproxy.RefreshTokenData{
+		ID:     "race-rt",
+		Scopes: []string{"openid"},
+	}, time.Minute); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	const goroutines = 16
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				// トークンエンドポイントと同じく、取得した値をその場で書き換える
+				ac, err := m.GetAuthCode(ctx, "race-code")
+				if err != nil || ac == nil {
+					continue
+				}
+				ac.Used = true
+				ac.Scopes[0] = "mutated"
+				if ac.User != nil {
+					ac.User.Email = "mutated@example.com"
+				}
+
+				rt, err := m.GetRefreshToken(ctx, "race-rt")
+				if err == nil && rt != nil {
+					rt.Used = true
+				}
+				if _, err := m.ConsumeRefreshToken(ctx, "race-rt"); err != nil && err != idproxy.ErrRefreshTokenAlreadyConsumed {
+					t.Errorf("ConsumeRefreshToken() error = %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, err := m.GetAuthCode(ctx, "race-code")
+	if err != nil {
+		t.Fatalf("GetAuthCode() error = %v", err)
+	}
+	if got.Used || got.Scopes[0] != "openid" || got.User.Email != "a@example.com" {
+		t.Errorf("ストア状態が呼び出し側の書き換えで破壊された: %+v", got)
+	}
+}

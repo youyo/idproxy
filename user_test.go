@@ -42,7 +42,7 @@ func TestUserFromContext_WithUser(t *testing.T) {
 		Issuer:  "https://accounts.google.com",
 	}
 
-	ctx := newContextWithUser(context.Background(), u)
+	ctx := NewContextWithUser(context.Background(), u)
 	got := UserFromContext(ctx)
 
 	if got == nil {
@@ -83,7 +83,7 @@ func TestUser_IDToken_SetAndGet(t *testing.T) {
 		Subject: "sub-123",
 		IDToken: rawToken,
 	}
-	ctx := newContextWithUser(context.Background(), &u)
+	ctx := NewContextWithUser(context.Background(), &u)
 	got := UserFromContext(ctx)
 	if got == nil {
 		t.Fatal("UserFromContext returned nil")

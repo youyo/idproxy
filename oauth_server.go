@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -295,6 +296,21 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 
 	case isCIMDClientID(clientID):
 		// URL 形式 client_id は CIMD として解決する。
+		// ただし CIMD は運用者が明示的に有効化した場合にのみ受け付ける（デフォルト無効）。
+		// 【重要・セキュリティ】metadata document は client_id の URL が指す第三者ホストが
+		// 配布するため redirect_uris は攻撃者が自由に決められる。本実装には利用者同意
+		// （consent）画面が無く、ログイン済みセッションがあれば /authorize は無言で
+		// 認可コードを発行するため、無条件に受け付けると認可コード窃取に直結する。
+		if !s.cimdClientsEnabled() {
+			s.logger.Debug("cimd client rejected: AllowCIMDClients is disabled", "client_id", clientID)
+			s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
+			return
+		}
+		if !s.isAllowedCIMDHost(clientID) {
+			s.logger.Debug("cimd client rejected: host is not allowed", "client_id", clientID)
+			s.authorizeError(w, "invalid_client", "unknown client_id", http.StatusBadRequest)
+			return
+		}
 		// fetch・検証の失敗はすべて invalid_client に潰し、静的 ClientID 未設定でも
 		// デフォルト許可経路へ落とさない（fail-closed）。
 		client, err := s.cimd.resolve(r.Context(), clientID)
@@ -320,7 +336,8 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 		dynamicClient = client
 	}
 
-	// redirect_uri 検証: 動的登録クライアントの場合は登録済み URI と照合
+	// redirect_uri 検証: 動的登録クライアントや CIMD クライアントの場合は
+	// まずクライアント固有の登録済み URI と完全一致で照合する。
 	if dynamicClient != nil {
 		uriAllowed := false
 		for _, u := range dynamicClient.RedirectURIs {
@@ -333,7 +350,16 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 			s.authorizeError(w, "invalid_request", "redirect_uri is not allowed", http.StatusBadRequest)
 			return
 		}
-	} else if !s.isAllowedRedirectURI(redirectURI) {
+	}
+
+	// 【重要・セキュリティ】運用者の許可リストはすべての経路で無条件に適用する。
+	// 本実装には利用者同意（consent）画面が存在せず、ログイン済みセッションがあれば
+	// /authorize は無言で認可コードを発行する。そのため「クライアント自身が申告した
+	// redirect_uris」だけを信頼すると、攻撃者が自分の URI を持つクライアントを
+	// CIMD document の公開や動的登録で用意するだけで認可コードを奪える
+	// （攻撃者自身がクライアントなので PKCE は防御にならない）。
+	// クライアント固有の照合に加えて運用者の許可リストも通ることを最終防衛線とする。
+	if !s.isAllowedRedirectURI(redirectURI) {
 		s.authorizeError(w, "invalid_request", "redirect_uri is not allowed", http.StatusBadRequest)
 		return
 	}
@@ -362,8 +388,12 @@ func (s *OAuthServer) authorizeHandler(w http.ResponseWriter, r *http.Request) {
 	// scope に "openid" を含む。
 	// MCP クライアント（claude.ai 等）は openid を省略する場合があるため、
 	// Gateway→IdP の脚では常に openid を付与して ID Token を取得できるよう自動補完する。
+	//
+	// 判定は空白区切りのトークン単位で行う（RFC 6749 §3.3）。
+	// 部分一致で判定すると "notopenid" のような偽のスコープが openid とみなされ、
+	// 自動補完がスキップされたまま AccessTokenData.Scopes に永続化されてしまう。
 	scope := q.Get("scope")
-	if !strings.Contains(scope, "openid") {
+	if !slices.Contains(strings.Fields(scope), "openid") {
 		if scope == "" {
 			scope = "openid"
 		} else {
@@ -545,15 +575,33 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 二重使用検出: Used フラグが true の場合
+		// セキュリティ: 認可コードの二重使用はコード漏洩の兆候であるため、
+		// refresh_token の replay 検知と同じく、引き換え時に払い出したトークンファミリーを
+		// tombstone で失効させ、認可コード自体も Store から削除する（RFC 6749 §4.1.2）。
 		if authCode.Used {
-			// セキュリティ: 認可コードの二重使用はトークン漏洩の兆候
-			// 関連する全アクセストークンを無効化すべき（ここでは Store から削除）
+			if authCode.FamilyID != "" {
+				_ = s.store.SetFamilyRevocation(ctx, authCode.FamilyID, s.refreshTokenTTL)
+			}
+			// 認可コード値やトークン値はログに出さない。
+			s.logger.Warn("oauth authorization code reuse detected",
+				"family_id", authCode.FamilyID, "client_id", authCode.ClientID)
+			if err := s.store.DeleteAuthCode(ctx, code); err != nil {
+				s.logger.Warn("failed to delete reused authorization code", "error", err.Error())
+			}
 			s.tokenError(w, "invalid_grant", "authorization code has already been used", http.StatusBadRequest)
 			return
 		}
 
-		// 認可コードを使用済みとマーク（一回使用制約）
+		// 認可コードを使用済みとマークし、発行するトークンファミリーを記録する（一回使用制約）。
+		// FamilyID を先に確定させることで、二重使用検知時に失効対象のファミリーを特定できる。
+		//
+		// 既知の残課題: ここは Get → チェック → Set の非アトミックな更新であり、
+		// 同一コードの同時引き換えを取りこぼす TOCTOU レースが残っている。
+		// 解消には Store インターフェースにアトミックな消費操作
+		//（ConsumeRefreshToken 相当）を追加する必要があるため、別途対応する。
+		familyID := uuid.NewString()
 		authCode.Used = true
+		authCode.FamilyID = familyID
 		codeTTL := authCode.ExpiresAt.Sub(authCode.CreatedAt)
 		if codeTTL <= 0 {
 			codeTTL = 5 * time.Minute
@@ -591,9 +639,9 @@ func (s *OAuthServer) tokenHandler(w http.ResponseWriter, r *http.Request) {
 			user = &User{}
 		}
 
-		// access_token + refresh_token を発行して応答（新 family）
+		// access_token + refresh_token を発行して応答（認可コードに記録した新 family）
 		// IDPRefreshToken も引き継ぐことで refresh_token rotation 時の IdP refresh が可能になる。
-		s.issueTokenResponse(w, r, user, authCode.Scopes, clientID, "", authCode.IDToken, authCode.IDPRefreshToken)
+		s.issueTokenResponse(w, r, user, authCode.Scopes, clientID, familyID, authCode.IDToken, authCode.IDPRefreshToken)
 
 	case "refresh_token":
 		refreshToken := r.PostFormValue("refresh_token")
@@ -856,12 +904,51 @@ func (s *OAuthServer) isAllowedRedirectURI(uri string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
+// cimdClientsEnabled は CIMD 形式 client_id の受け付けが有効かを返す。
+// OAuth 設定が無い場合、および AllowCIMDClients 未設定の場合は無効（デフォルト安全）。
+func (s *OAuthServer) cimdClientsEnabled() bool {
+	return s.config.OAuth != nil && s.config.OAuth.AllowCIMDClients
+}
+
+// isAllowedCIMDHost は CIMD client_id のホストが許可リストに含まれるかを判定する。
+// AllowedCIMDHosts が空の場合は（AllowCIMDClients による明示的な有効化を前提に）
+// 任意のホストを許可する。
+func (s *OAuthServer) isAllowedCIMDHost(clientID string) bool {
+	if s.config.OAuth == nil || len(s.config.OAuth.AllowedCIMDHosts) == 0 {
+		return true
+	}
+	parsed, err := url.Parse(clientID)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	for _, allowed := range s.config.OAuth.AllowedCIMDHosts {
+		if host == strings.ToLower(allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+// /register は未認証で叩けるため、リクエストの各要素に上限を設ける。
+// Store には TTL も IP 単位の制限も無く、登録内容はそのまま永続化されるため、
+// 上限が無いと 1 リクエストで任意サイズのデータを流し込めてしまう。
+const (
+	// registerMaxBodyBytes は POST /register のリクエストボディ上限。
+	registerMaxBodyBytes = 8 << 10 // 8 KiB
+	// registerMaxRedirectURIs は redirect_uris に指定できる最大件数。
+	registerMaxRedirectURIs = 20
+	// registerMaxRedirectURILen は redirect_uri 1 件あたりの最大長。
+	registerMaxRedirectURILen = 2048
+)
+
 // registerHandler は POST /register を処理する。
 // RFC 7591 Dynamic Client Registration に準拠し、クライアントを動的に登録する。
 //
 //  1. Content-Type: application/json を検証
-//  2. リクエスト JSON をパース（redirect_uris 必須、client_name オプション）
-//  3. redirect_uris のバリデーション（各 URI が有効か）
+//  2. リクエスト JSON をパース（redirect_uris 必須、client_name オプション）。
+//     ボディは registerMaxBodyBytes までに制限する
+//  3. redirect_uris のバリデーション（件数・各 URI の長さ・各 URI が有効か）
 //  4. client_id を UUID で自動生成
 //  5. Store.SetClient で保存
 //  6. 201 Created でクライアント情報を返却
@@ -885,7 +972,13 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		Scope           string   `json:"scope"`
 		ApplicationType string   `json:"application_type"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 未認証エンドポイントのためボディ長を制限する。
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, registerMaxBodyBytes)).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			s.registerError(w, "invalid_request", fmt.Sprintf("request body must not exceed %d bytes", registerMaxBodyBytes), http.StatusRequestEntityTooLarge)
+			return
+		}
 		s.registerError(w, "invalid_request", "failed to parse JSON body", http.StatusBadRequest)
 		return
 	}
@@ -895,9 +988,17 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 		s.registerError(w, "invalid_request", "redirect_uris is required and must not be empty", http.StatusBadRequest)
 		return
 	}
+	if len(req.RedirectURIs) > registerMaxRedirectURIs {
+		s.registerError(w, "invalid_request", fmt.Sprintf("redirect_uris must not contain more than %d entries", registerMaxRedirectURIs), http.StatusBadRequest)
+		return
+	}
 
 	// redirect_uris バリデーション
 	for _, uri := range req.RedirectURIs {
+		if len(uri) > registerMaxRedirectURILen {
+			s.registerError(w, "invalid_request", fmt.Sprintf("redirect_uri must not exceed %d bytes", registerMaxRedirectURILen), http.StatusBadRequest)
+			return
+		}
 		parsed, err := url.Parse(uri)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			s.registerError(w, "invalid_request", fmt.Sprintf("invalid redirect_uri: %s", uri), http.StatusBadRequest)
@@ -912,7 +1013,8 @@ func (s *OAuthServer) registerHandler(w http.ResponseWriter, r *http.Request) {
 	if applicationType == "" {
 		applicationType = "web"
 	} else if applicationType != "web" && applicationType != "native" {
-		s.logger.Debug("oauth register: unknown application_type", "application_type", applicationType)
+		// 値そのものは攻撃者が任意長で指定できるためログに出さず、長さだけ記録する。
+		s.logger.Debug("oauth register: unknown application_type", "length", len(applicationType))
 	}
 
 	// client_id を UUID で自動生成

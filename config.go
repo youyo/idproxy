@@ -26,6 +26,10 @@ type Config struct {
 
 	// AllowedEmails は許可する個別メールアドレスのリスト。
 	// AllowedDomains と OR 条件で評価される。
+	//
+	// AllowedDomains / AllowedEmails のいずれかが非空の場合、ブラウザ認証フローは
+	// ID Token の `email_verified` が真であることも要求する（未設定なら未検証扱い）。
+	// email が self-asserted な IdP でのなりすまし登録を防ぐための挙動で、opt-out はない。
 	AllowedEmails []string
 
 	// ExternalURL はこのサービスの外部公開 URL。
@@ -178,6 +182,24 @@ type OAuthConfig struct {
 	// /authorize エンドポイントで redirect_uri の検証に使用する。
 	// 空の場合、localhost の URI のみ許可する（開発用）。
 	AllowedRedirectURIs []string
+
+	// AllowCIMDClients は CIMD（Client ID Metadata Documents）形式の client_id を
+	// /authorize で受け付けるかどうか。デフォルトは false（無効）。
+	//
+	// 【重要・セキュリティ】CIMD の metadata document は client_id の URL が指す
+	// 任意の第三者ホストが配布するものであり、その redirect_uris は攻撃者が自由に決められる。
+	// さらに本実装には利用者同意（consent）画面が存在しないため、有効化すると
+	// 「攻撃者が document を公開し、ログイン済みの被害者に /authorize リンクを 1 つ送る」
+	// だけで認可コードを攻撃者の URL へ渡せてしまう。
+	// そのため運用者が明示的に有効化した場合にのみ受け付ける。
+	//
+	// 有効にした場合でも、redirect_uri は AllowedRedirectURIs の許可リストで検証される。
+	AllowCIMDClients bool
+
+	// AllowedCIMDHosts は CIMD client_id として許可するホスト名のリスト。
+	// 空の場合、AllowCIMDClients が true なら任意のホストを許可する。
+	// 比較はホスト名（ポートを除く）の小文字一致で行う。
+	AllowedCIMDHosts []string
 }
 
 // DefaultConfig は Config のデフォルト値を保持する。

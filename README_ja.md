@@ -93,7 +93,7 @@ services:
 | `ALLOWED_EMAILS` | 許可メールアドレス（カンマ区切り） | 制限なし |
 | `PATH_PREFIX` | OAuth 2.1 AS エンドポイントのパスプレフィックス | なし |
 | `PORT` | リッスンポート | `8080` |
-| `UPSTREAM_AUTH_TOKEN` | upstream への全リクエストに `Authorization: Bearer <値>` として注入するトークン。注入前にクライアント自身の `Authorization` ヘッダーを削除する（upstream にはクライアントの値は一切渡らない）。**未設定時はクライアントの `Authorization` ヘッダーがそのまま upstream に届く**（既定挙動で、既存デプロイの挙動は変わらない） | なし |
+| `UPSTREAM_AUTH_TOKEN` | upstream への全リクエストに `Authorization: Bearer <値>` として注入するトークン。注入前にクライアント自身の `Authorization` ヘッダーと idproxy のセッション Cookie（`_idproxy_session`）を削除する（upstream にはどちらも渡らない。それ以外の Cookie はそのまま転送する）。**未設定時はクライアントの `Authorization` ヘッダーと Cookie がそのまま upstream に届く**（既定挙動で、既存デプロイの挙動は変わらない） | なし |
 
 ## プロバイダー設定
 
@@ -350,7 +350,7 @@ MCP spec `2026-07-28` は Dynamic Client Registration (RFC 7591) を Deprecated 
 [youyo/focal](https://github.com/youyo/focal) の `focal serve` は認証を持たない stateless Streamable HTTP の MCP エンドポイントを公開し、前段に認証プロキシを置くことを前提にしている。idproxy の `UPSTREAM_URL` の Unix domain socket 対応と `UPSTREAM_AUTH_TOKEN` は、focal 側の 2 つの upstream 強化手段にそのまま対応する。
 
 - **同一ホスト・同一 UID — Unix domain socket。** focal が listen する socket（`focal serve --listen unix:/run/focal/focal.sock`）を `UPSTREAM_URL` で指す: `UPSTREAM_URL=unix:///run/focal/focal.sock`。socket は `0600` のため到達できるのは同一ユーザーのみで、idproxy と focal は同一 UID で動かす必要がある。
-- **別ホスト・別コンテナ — 共有トークン。** `focal serve` を `FOCAL_UPSTREAM_TOKEN` 設定付きで起動し、idproxy 側の `UPSTREAM_AUTH_TOKEN` に同じ値を設定する。idproxy は upstream へのすべてのリクエストに `Authorization: Bearer <UPSTREAM_AUTH_TOKEN>` を注入し、クライアントが送った `Authorization` は削除する。そのため focal 側にはクライアントの OAuth Bearer トークンは一切届かず、常に共有トークンだけが見える。
+- **別ホスト・別コンテナ — 共有トークン。** `focal serve` を `FOCAL_UPSTREAM_TOKEN` 設定付きで起動し、idproxy 側の `UPSTREAM_AUTH_TOKEN` に同じ値を設定する。idproxy は upstream へのすべてのリクエストに `Authorization: Bearer <UPSTREAM_AUTH_TOKEN>` を注入し、クライアントが送った `Authorization` と idproxy 自身のセッション Cookie（`_idproxy_session`）を削除する。そのため focal 側にはクライアントの OAuth Bearer トークンも、`EXTERNAL_URL` に対して再利用できるセッション Cookie も届かず、常に共有トークンだけが見える。クライアントが送ったそれ以外の Cookie はそのまま転送される。
 
 いずれの方式でもクライアント側のフローは変わらない。Claude Desktop（等の MCP クライアント）は `EXTERNAL_URL` 経由で idproxy の OAuth 2.1 AS に対して認証し、idproxy は認証を通過したリクエストだけを `UPSTREAM_URL` 経由で focal に転送する。
 

@@ -27,6 +27,8 @@ type fakeDynamoDBClient struct {
 	deleteItemErr error
 	// PutItem に渡された最後のアイテムを記録 (T04 検証用)
 	lastPutItem map[string]types.AttributeValue
+	// GetItem に渡された最後の ConsistentRead を記録（強整合性読み取りの検証用）
+	lastGetConsistentRead bool
 }
 
 func newFakeDynamoDBClient() *fakeDynamoDBClient {
@@ -38,6 +40,12 @@ func newFakeDynamoDBClient() *fakeDynamoDBClient {
 func (f *fakeDynamoDBClient) GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if params.ConsistentRead != nil {
+		f.lastGetConsistentRead = *params.ConsistentRead
+	} else {
+		f.lastGetConsistentRead = false
+	}
 
 	if f.getItemErr != nil {
 		return nil, f.getItemErr
@@ -1542,5 +1550,81 @@ func TestDynamoDBStore_UTC04_Client_TimeNormalized(t *testing.T) {
 	}
 	if !got.CreatedAt.Equal(createdAt) {
 		t.Errorf("CreatedAt = %v, want %v (same instant)", got.CreatedAt, createdAt)
+	}
+}
+
+// TestDynamoDBStore_GetAccessToken_ConsistentRead は GetAccessToken が
+// 強整合性読み取りを使うことを検証する。
+// 結果整合性読み取りではリボケーション済みトークンが古いレプリカで通過しうる。
+func TestDynamoDBStore_GetAccessToken_ConsistentRead(t *testing.T) {
+	ctx := context.Background()
+	s, fake := newTestDynamoDBStore(nil)
+
+	data := &idproxy.AccessTokenData{
+		JTI:       "jti-consistent",
+		Subject:   "sub-001",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	if err := s.SetAccessToken(ctx, "jti-consistent", data, time.Hour); err != nil {
+		t.Fatalf("SetAccessToken() error = %v", err)
+	}
+
+	if _, err := s.GetAccessToken(ctx, "jti-consistent"); err != nil {
+		t.Fatalf("GetAccessToken() error = %v", err)
+	}
+	if !fake.lastGetConsistentRead {
+		t.Error("GetAccessToken() が結果整合性読み取りを使っている: ConsistentRead=true であるべき")
+	}
+}
+
+// TestDynamoDBStore_ConsumeRefreshToken_PreservesTTL は ConsumeRefreshToken が
+// アイテムの ttl 属性を SetRefreshToken の `ttl` 引数どおりに保存し続けることを検証する。
+//
+// Store の契約では TTL は `ttl` 引数が権威であり、RefreshTokenData.ExpiresAt は
+// ゼロ値でも合法。ExpiresAt から ttl を再計算すると消費直後にアイテムが
+// 期限切れ扱いとなり、replay 検知(ErrRefreshTokenAlreadyConsumed)が無効化される。
+func TestDynamoDBStore_ConsumeRefreshToken_PreservesTTL(t *testing.T) {
+	ctx := context.Background()
+	s, fake := newTestDynamoDBStore(nil)
+
+	// ExpiresAt はゼロ値のまま。TTL は ttl 引数のみで指定する。
+	data := &idproxy.RefreshTokenData{
+		ID:       "rt-zero-expires",
+		FamilyID: "family-001",
+		ClientID: "client-001",
+		Subject:  "sub-001",
+	}
+	if err := s.SetRefreshToken(ctx, "rt-zero-expires", data, time.Hour); err != nil {
+		t.Fatalf("SetRefreshToken() error = %v", err)
+	}
+
+	pk := refreshTokenPK("rt-zero-expires")
+	fake.mu.Lock()
+	before := fake.items[pk]["ttl"].(*types.AttributeValueMemberN).Value
+	fake.mu.Unlock()
+
+	// 初回消費
+	got, err := s.ConsumeRefreshToken(ctx, "rt-zero-expires")
+	if err != nil {
+		t.Fatalf("ConsumeRefreshToken() error = %v", err)
+	}
+	if got == nil || !got.Used {
+		t.Fatalf("ConsumeRefreshToken() = %+v, want Used=true", got)
+	}
+
+	fake.mu.Lock()
+	after := fake.items[pk]["ttl"].(*types.AttributeValueMemberN).Value
+	fake.mu.Unlock()
+	if after != before {
+		t.Errorf("ttl が消費で書き換えられた: before=%s after=%s", before, after)
+	}
+
+	// replay: 期限切れ扱いにならず ErrRefreshTokenAlreadyConsumed が返ること
+	replay, err := s.ConsumeRefreshToken(ctx, "rt-zero-expires")
+	if !errors.Is(err, idproxy.ErrRefreshTokenAlreadyConsumed) {
+		t.Fatalf("replay ConsumeRefreshToken() error = %v, want ErrRefreshTokenAlreadyConsumed", err)
+	}
+	if replay == nil || replay.FamilyID != "family-001" {
+		t.Errorf("replay data = %+v, want FamilyID=family-001", replay)
 	}
 }

@@ -24,6 +24,101 @@ func (e *memoryEntry[T]) isExpired() bool {
 	return !e.expiresAt.IsZero() && time.Now().After(e.expiresAt)
 }
 
+// --- ディープコピーヘルパ ---
+//
+// MemoryStore は他バックエンド（Redis / DynamoDB / SQLite）と異なり
+// JSON シリアライズを経由しないため、Get* が格納中のポインタをそのまま返すと
+// 呼び出し側の書き込み（例: oauth_server の authCode.Used = true）が
+// ロック外から共有状態を書き換え、データ競合とストア破壊を引き起こす。
+// そのため Get* は複製を返し、Set* は引数を複製してから格納する。
+
+// cloneStringSlice は文字列スライスを複製する。nil は nil のまま返す。
+func cloneStringSlice(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, len(s))
+	copy(out, s)
+	return out
+}
+
+// cloneClaims はクレームマップを複製する。
+// 値は interface{} のため最上位のみの複製だが、
+// クレームは復号後に読み取り専用で扱われるためこれで十分。
+func cloneClaims(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// cloneUser は User を複製する。
+func cloneUser(u *idproxy.User) *idproxy.User {
+	if u == nil {
+		return nil
+	}
+	c := *u
+	c.Claims = cloneClaims(u.Claims)
+	return &c
+}
+
+// cloneSession は Session を複製する。
+func cloneSession(s *idproxy.Session) *idproxy.Session {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	c.User = cloneUser(s.User)
+	return &c
+}
+
+// cloneAuthCodeData は AuthCodeData を複製する。
+func cloneAuthCodeData(d *idproxy.AuthCodeData) *idproxy.AuthCodeData {
+	if d == nil {
+		return nil
+	}
+	c := *d
+	c.Scopes = cloneStringSlice(d.Scopes)
+	c.User = cloneUser(d.User)
+	return &c
+}
+
+// cloneAccessTokenData は AccessTokenData を複製する。
+func cloneAccessTokenData(d *idproxy.AccessTokenData) *idproxy.AccessTokenData {
+	if d == nil {
+		return nil
+	}
+	c := *d
+	c.Scopes = cloneStringSlice(d.Scopes)
+	return &c
+}
+
+// cloneRefreshTokenData は RefreshTokenData を複製する。
+func cloneRefreshTokenData(d *idproxy.RefreshTokenData) *idproxy.RefreshTokenData {
+	if d == nil {
+		return nil
+	}
+	c := *d
+	c.Scopes = cloneStringSlice(d.Scopes)
+	return &c
+}
+
+// cloneClientData は ClientData を複製する。
+func cloneClientData(d *idproxy.ClientData) *idproxy.ClientData {
+	if d == nil {
+		return nil
+	}
+	c := *d
+	c.RedirectURIs = cloneStringSlice(d.RedirectURIs)
+	c.GrantTypes = cloneStringSlice(d.GrantTypes)
+	c.ResponseTypes = cloneStringSlice(d.ResponseTypes)
+	return &c
+}
+
 // MemoryStore はインメモリの Store 実装。
 // シングルインスタンス環境とテスト用途に適する。
 type MemoryStore struct {
@@ -86,7 +181,7 @@ func (m *MemoryStore) SetSession(ctx context.Context, id string, session *idprox
 	defer m.mu.Unlock()
 
 	m.sessions[id] = &memoryEntry[idproxy.Session]{
-		value:     session,
+		value:     cloneSession(session),
 		expiresAt: time.Now().Add(ttl),
 	}
 	return nil
@@ -109,7 +204,7 @@ func (m *MemoryStore) GetSession(ctx context.Context, id string) (*idproxy.Sessi
 	if entry.isExpired() {
 		return nil, nil
 	}
-	return entry.value, nil
+	return cloneSession(entry.value), nil
 }
 
 // DeleteSession はセッションを削除する。存在しない ID の削除はエラーにならない（冪等）。
@@ -137,7 +232,7 @@ func (m *MemoryStore) SetAuthCode(ctx context.Context, code string, data *idprox
 	defer m.mu.Unlock()
 
 	m.authCodes[code] = &memoryEntry[idproxy.AuthCodeData]{
-		value:     data,
+		value:     cloneAuthCodeData(data),
 		expiresAt: time.Now().Add(ttl),
 	}
 	return nil
@@ -160,7 +255,7 @@ func (m *MemoryStore) GetAuthCode(ctx context.Context, code string) (*idproxy.Au
 	if entry.isExpired() {
 		return nil, nil
 	}
-	return entry.value, nil
+	return cloneAuthCodeData(entry.value), nil
 }
 
 // DeleteAuthCode は認可コードを削除する。存在しない code の削除はエラーにならない（冪等）。
@@ -188,7 +283,7 @@ func (m *MemoryStore) SetAccessToken(ctx context.Context, jti string, data *idpr
 	defer m.mu.Unlock()
 
 	m.accessTokens[jti] = &memoryEntry[idproxy.AccessTokenData]{
-		value:     data,
+		value:     cloneAccessTokenData(data),
 		expiresAt: time.Now().Add(ttl),
 	}
 	return nil
@@ -211,7 +306,7 @@ func (m *MemoryStore) GetAccessToken(ctx context.Context, jti string) (*idproxy.
 	if entry.isExpired() {
 		return nil, nil
 	}
-	return entry.value, nil
+	return cloneAccessTokenData(entry.value), nil
 }
 
 // DeleteAccessToken はアクセストークンを削除する。存在しない JTI の削除はエラーにならない（冪等）。
@@ -239,7 +334,7 @@ func (m *MemoryStore) SetClient(ctx context.Context, clientID string, data *idpr
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.clients[clientID] = data
+	m.clients[clientID] = cloneClientData(data)
 	return nil
 }
 
@@ -257,7 +352,7 @@ func (m *MemoryStore) GetClient(ctx context.Context, clientID string) (*idproxy.
 	if !ok {
 		return nil, nil
 	}
-	return data, nil
+	return cloneClientData(data), nil
 }
 
 // DeleteClient はクライアントを削除する。存在しない clientID の削除はエラーにならない（冪等）。
@@ -321,7 +416,7 @@ func (m *MemoryStore) SetRefreshToken(ctx context.Context, id string, data *idpr
 	defer m.mu.Unlock()
 
 	m.refreshTokens[id] = &memoryEntry[idproxy.RefreshTokenData]{
-		value:     data,
+		value:     cloneRefreshTokenData(data),
 		expiresAt: time.Now().Add(ttl),
 	}
 	return nil
@@ -344,7 +439,7 @@ func (m *MemoryStore) GetRefreshToken(ctx context.Context, id string) (*idproxy.
 	if entry.isExpired() {
 		return nil, nil
 	}
-	return entry.value, nil
+	return cloneRefreshTokenData(entry.value), nil
 }
 
 // ConsumeRefreshToken はリフレッシュトークンを消費する。
@@ -371,17 +466,17 @@ func (m *MemoryStore) ConsumeRefreshToken(ctx context.Context, id string) (*idpr
 	}
 
 	// データのコピーを作成して返す
-	dataCopy := *entry.value
+	dataCopy := cloneRefreshTokenData(entry.value)
 
 	if entry.value.Used {
 		// 既に消費済み: data を返し ErrRefreshTokenAlreadyConsumed も返す
-		return &dataCopy, idproxy.ErrRefreshTokenAlreadyConsumed
+		return dataCopy, idproxy.ErrRefreshTokenAlreadyConsumed
 	}
 
 	// 初回消費: Used=true に更新
 	entry.value.Used = true
 	dataCopy.Used = true
-	return &dataCopy, nil
+	return dataCopy, nil
 }
 
 // SetFamilyRevocation は familyID の tombstone レコードを保存する。
