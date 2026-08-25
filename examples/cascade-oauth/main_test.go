@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -12,6 +13,23 @@ import (
 	"github.com/youyo/idproxy/store"
 	"github.com/youyo/idproxy/testutil"
 )
+
+// newBrowserLikeClient は Cookie を保持しつつ自動リダイレクトを抑止する
+// HTTP クライアントを返す。/login が発行する binder Cookie を /callback へ
+// 引き継ぐため、実ブラウザ同様に Cookie jar を持たせている。
+func newBrowserLikeClient(t *testing.T) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New: %v", err)
+	}
+	return &http.Client{
+		Jar: jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 // TestExternalTokenStore_HasToken は in-memory token store の最小動作を確認する。
 func TestExternalTokenStore_HasToken(t *testing.T) {
@@ -96,12 +114,7 @@ func TestOnAuthenticated_RedirectsToExternalStart_WhenNoToken(t *testing.T) {
 	defer srv.Close()
 
 	// Step 1: /login で IdP authorize URL に飛ばす
-	client := &http.Client{
-		// 自動リダイレクトを抑止し各ステップを観察
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	client := newBrowserLikeClient(t)
 	resp, err := client.Get(srv.URL + "/login")
 	if err != nil {
 		t.Fatalf("GET /login: %v", err)
@@ -170,9 +183,7 @@ func TestOnAuthenticated_FallsThrough_WhenTokenExists(t *testing.T) {
 	srv := httptest.NewServer(auth.Wrap(mux))
 	defer srv.Close()
 
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
+	client := newBrowserLikeClient(t)
 	resp, err := client.Get(srv.URL + "/login")
 	if err != nil {
 		t.Fatalf("GET /login: %v", err)

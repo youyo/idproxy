@@ -123,7 +123,11 @@ func parseUpstream(raw string) (*url.URL, string, error) {
 // 注入前に削除する。Director ではなく Rewrite フックを使うのは、Director は
 // hop-by-hop ヘッダー除去の前に呼ばれるため、クライアントが
 // Connection: Authorization を送ると注入したヘッダーごと落ちるため
-// （golang/go#50580）。
+// （golang/go#50580）。あわせてセッション Cookie も除去する
+// （stripSessionCookie）。
+//
+// あわせて ID 系ヘッダー（identityHeaders）はクライアント由来の値を必ず削除し、
+// 認証済みなら idproxy の認証結果で付け直す（rewriteIdentityHeaders）。
 func newReverseProxy(upstream, authToken string) (*httputil.ReverseProxy, error) {
 	target, socketPath, err := parseUpstream(upstream)
 	if err != nil {
@@ -136,10 +140,12 @@ func newReverseProxy(upstream, authToken string) (*httputil.ReverseProxy, error)
 			// SetURL は Out.Host を空にするため、inbound の Host を明示的に保持する。
 			pr.Out.Host = pr.In.Host
 			restoreForwardedHeaders(pr)
+			rewriteIdentityHeaders(pr)
 
 			if authToken != "" {
 				pr.Out.Header.Del("Authorization")
 				pr.Out.Header.Set("Authorization", "Bearer "+authToken)
+				stripSessionCookie(pr.Out)
 			}
 		},
 	}
@@ -181,6 +187,92 @@ func restoreForwardedHeaders(pr *httputil.ProxyRequest) {
 		clientIP = strings.Join(prior, ", ") + ", " + clientIP
 	}
 	pr.Out.Header.Set("X-Forwarded-For", clientIP)
+}
+
+// stripSessionCookie は idproxy のセッション Cookie（idproxy.SessionCookieName）を
+// upstream へのリクエストから取り除く。
+//
+// Cookie は hop-by-hop ヘッダーではないため、Authorization を差し替えても
+// ブラウザ認証時のセッション Cookie はそのまま upstream に届く。この Cookie は
+// EXTERNAL_URL に対してユーザーとして振る舞える完全な資格情報であり、
+// /authorize がセッション認証を受け付けるため OAuth code の発行まで可能になる。
+// UPSTREAM_AUTH_TOKEN を設定した構成の「upstream にクライアントの資格情報を
+// 渡さない」という前提を破る。
+//
+// upstream 自身の Cookie を必要とする構成があるため、Cookie ヘッダー全体では
+// なく該当 Cookie だけを外し、残りが空になったときだけヘッダーを削除する。
+// セッション Cookie が無いリクエストではヘッダーに一切触れない。
+func stripSessionCookie(out *http.Request) {
+	cookies := out.Cookies()
+	kept := make([]string, 0, len(cookies))
+	found := false
+	for _, c := range cookies {
+		if c.Name == idproxy.SessionCookieName {
+			found = true
+			continue
+		}
+		kept = append(kept, c.Name+"="+c.Value)
+	}
+	if !found {
+		return
+	}
+	if len(kept) == 0 {
+		out.Header.Del("Cookie")
+		return
+	}
+	out.Header.Set("Cookie", strings.Join(kept, "; "))
+}
+
+// identityHeaders は「前段のプロキシが認証結果として付けた」と upstream が
+// 解釈しうる ID 系ヘッダーの denylist。oauth2-proxy 系（X-Forwarded-*・
+// X-Auth-Request-*）と nginx/Apache 系（X-Remote-*）の慣習を網羅する。
+//
+// UPSTREAM_AUTH_TOKEN を設定した構成では、upstream は共有トークンによって
+// 「このリクエストは idproxy から来た」と判断できてしまうため、クライアントが
+// 自分で付けた ID ヘッダーをそのまま素通しすると権限昇格（confused deputy）に
+// なる。認証の有無にかかわらず無条件に削除する。
+var identityHeaders = []string{
+	"X-Forwarded-User",
+	"X-Forwarded-Email",
+	"X-Forwarded-Preferred-Username",
+	"X-Forwarded-Groups",
+	"X-Auth-Request-User",
+	"X-Auth-Request-Email",
+	"X-Auth-Request-Groups",
+	"X-Auth-Request-Preferred-Username",
+	"X-Remote-User",
+	"X-Remote-Email",
+	"X-Remote-Groups",
+	"X-Authenticated-User",
+	"X-User",
+	"X-Email",
+}
+
+// rewriteIdentityHeaders はクライアント由来の ID 系ヘッダーをすべて削除し、
+// 認証済みの場合のみ idproxy 自身の認証結果を X-Forwarded-User（sub）と
+// X-Forwarded-Email として付け直す。これにより upstream は「idproxy が付けた
+// ID ヘッダーだけが存在する」という単純な前提を置ける。
+//
+// 認証済みユーザーは Auth.Wrap がリクエストコンテキストへ注入する。
+// ReverseProxy は pr.In に元のリクエストをそのまま持たせるため、
+// pr.In.Context() から UserFromContext で取得できる。
+// 未認証パス（/healthz 等）では何もセットしない。
+func rewriteIdentityHeaders(pr *httputil.ProxyRequest) {
+	// Header.Del は正規化を行うため、map の直接操作ではなく必ず Del を使う。
+	for _, name := range identityHeaders {
+		pr.Out.Header.Del(name)
+	}
+
+	user := idproxy.UserFromContext(pr.In.Context())
+	if user == nil {
+		return
+	}
+	if user.Subject != "" {
+		pr.Out.Header.Set("X-Forwarded-User", user.Subject)
+	}
+	if user.Email != "" {
+		pr.Out.Header.Set("X-Forwarded-Email", user.Email)
+	}
 }
 
 // connectionListsHeader は Connection ヘッダーが name を hop-by-hop として

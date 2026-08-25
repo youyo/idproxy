@@ -93,7 +93,7 @@ services:
 | `ALLOWED_EMAILS` | Allowed email addresses (comma-separated) | no restriction |
 | `PATH_PREFIX` | OAuth 2.1 AS endpoint path prefix | none |
 | `PORT` | Listen port | `8080` |
-| `UPSTREAM_AUTH_TOKEN` | Token injected as `Authorization: Bearer <value>` on every upstream request; the client's own `Authorization` header is removed before injection (never forwarded to upstream). **If unset, the client's `Authorization` header is forwarded to upstream unchanged** — this is the default behavior and does not change existing deployments. | none |
+| `UPSTREAM_AUTH_TOKEN` | Token injected as `Authorization: Bearer <value>` on every upstream request; the client's own `Authorization` header and idproxy's session cookie (`_idproxy_session`) are removed before injection (neither is forwarded to upstream; other cookies are left untouched). **If unset, the client's `Authorization` header and cookies are forwarded to upstream unchanged** — this is the default behavior and does not change existing deployments. | none |
 
 ## Provider Setup
 
@@ -422,7 +422,7 @@ MCP spec `2026-07-28` deprecates Dynamic Client Registration (RFC 7591) in favor
 [youyo/focal](https://github.com/youyo/focal)'s `focal serve` exposes an unauthenticated stateless Streamable HTTP MCP endpoint and expects an authenticating reverse proxy in front of it. idproxy's `UPSTREAM_URL` Unix domain socket support and `UPSTREAM_AUTH_TOKEN` map directly onto focal's two upstream-hardening options:
 
 - **Same host, same UID — Unix domain socket.** Point `UPSTREAM_URL` at the socket focal listens on (`focal serve --listen unix:/run/focal/focal.sock`): `UPSTREAM_URL=unix:///run/focal/focal.sock`. The socket's `0600` permissions restrict reachability to the same user; idproxy and focal must run under the same UID.
-- **Different hosts/containers — shared token.** Run `focal serve` with `FOCAL_UPSTREAM_TOKEN` set, and set idproxy's `UPSTREAM_AUTH_TOKEN` to the same value. idproxy injects `Authorization: Bearer <UPSTREAM_AUTH_TOKEN>` on every upstream request and strips whatever `Authorization` the client sent, so focal only ever sees the shared token, never the client's OAuth Bearer token.
+- **Different hosts/containers — shared token.** Run `focal serve` with `FOCAL_UPSTREAM_TOKEN` set, and set idproxy's `UPSTREAM_AUTH_TOKEN` to the same value. idproxy injects `Authorization: Bearer <UPSTREAM_AUTH_TOKEN>` on every upstream request and strips both whatever `Authorization` the client sent and idproxy's own session cookie (`_idproxy_session`), so focal only ever sees the shared token — never the client's OAuth Bearer token, and never a session cookie it could replay against `EXTERNAL_URL`. Any other cookie the client sent is forwarded unchanged.
 
 Either way, the client-facing flow is unchanged: Claude Desktop (or another MCP client) authenticates against idproxy's OAuth 2.1 AS over `EXTERNAL_URL`, and idproxy forwards only authenticated requests to focal over `UPSTREAM_URL`.
 

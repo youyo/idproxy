@@ -22,6 +22,16 @@ import (
 func setupCIMDServer(t *testing.T, ts *cimdTestServer, staticClientID string) (*OAuthServer, *SessionManager) {
 	t.Helper()
 
+	return setupCIMDServerWithConfig(t, ts, staticClientID, func(o *OAuthConfig) {
+		// CIMD はデフォルト無効なので、CIMD 経路を検証するテストでは明示的に有効化する。
+		o.AllowCIMDClients = true
+	})
+}
+
+// setupCIMDServerWithConfig は OAuthConfig を customize してから OAuthServer を構築する。
+func setupCIMDServerWithConfig(t *testing.T, ts *cimdTestServer, staticClientID string, customize func(*OAuthConfig)) (*OAuthServer, *SessionManager) {
+	t.Helper()
+
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("failed to generate ECDSA key: %v", err)
@@ -44,6 +54,9 @@ func setupCIMDServer(t *testing.T, ts *cimdTestServer, staticClientID string) (*
 			SigningKey: privateKey,
 			ClientID:   staticClientID,
 		},
+	}
+	if customize != nil {
+		customize(cfg.OAuth)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -114,6 +127,98 @@ func TestOAuthServer_AuthorizeWithCIMDClient(t *testing.T) {
 				t.Errorf("expected authorization code in redirect, got %q", locURL.String())
 			}
 		})
+	}
+}
+
+// TestOAuthServer_AuthorizeCIMDDisabledByDefault は AllowCIMDClients 未設定のとき
+// CIMD 形式 client_id が invalid_client 400 になり、fetch も発行されないことを検証する。
+func TestOAuthServer_AuthorizeCIMDDisabledByDefault(t *testing.T) {
+	for _, staticClientID := range []string{"test-oauth-client", ""} {
+		name := "static client_id set"
+		if staticClientID == "" {
+			name = "static client_id unset"
+		}
+		t.Run(name, func(t *testing.T) {
+			ts := newCIMDDocumentServer(t, validCIMDDocument())
+			srv, sm := setupCIMDServerWithConfig(t, ts, staticClientID, nil)
+
+			q := cimdAuthorizeQuery(ts.clientID("/client.json"))
+			req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+			for _, c := range issueTestSession(t, sm) {
+				req.AddCookie(c)
+			}
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected %d, got %d; body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "invalid_client") {
+				t.Errorf("expected invalid_client error, got %s", w.Body.String())
+			}
+			if got := ts.fetches.Load(); got != 0 {
+				t.Errorf("expected no CIMD fetch when disabled, got %d", got)
+			}
+		})
+	}
+}
+
+// TestOAuthServer_AuthorizeCIMDHostAllowlist は AllowedCIMDHosts に無いホストの
+// client_id が fetch されずに拒否されることを検証する。
+func TestOAuthServer_AuthorizeCIMDHostAllowlist(t *testing.T) {
+	ts := newCIMDDocumentServer(t, validCIMDDocument())
+	srv, sm := setupCIMDServerWithConfig(t, ts, "test-oauth-client", func(o *OAuthConfig) {
+		o.AllowCIMDClients = true
+		o.AllowedCIMDHosts = []string{"trusted.example.com"}
+	})
+
+	q := cimdAuthorizeQuery(ts.clientID("/client.json"))
+	req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+	for _, c := range issueTestSession(t, sm) {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_client") {
+		t.Errorf("expected invalid_client error, got %s", w.Body.String())
+	}
+	if got := ts.fetches.Load(); got != 0 {
+		t.Errorf("expected no CIMD fetch for disallowed host, got %d", got)
+	}
+}
+
+// TestOAuthServer_AuthorizeCIMDRespectsOperatorAllowlist は、metadata document の
+// redirect_uris に含まれていても運用者の AllowedRedirectURIs を通らない
+// redirect_uri が拒否されることを検証する（同意画面が無いことへの最終防衛線）。
+func TestOAuthServer_AuthorizeCIMDRespectsOperatorAllowlist(t *testing.T) {
+	doc := validCIMDDocument()
+	doc["redirect_uris"] = []string{"https://evil.example.com/cb"}
+	ts := newCIMDDocumentServer(t, doc)
+
+	srv, sm := setupCIMDServerWithConfig(t, ts, "test-oauth-client", func(o *OAuthConfig) {
+		o.AllowCIMDClients = true
+		o.AllowedRedirectURIs = []string{"https://app.example.com/callback"}
+	})
+
+	q := cimdAuthorizeQuery(ts.clientID("/client.json"))
+	q.Set("redirect_uri", "https://evil.example.com/cb")
+
+	req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+	for _, c := range issueTestSession(t, sm) {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_request") {
+		t.Errorf("expected invalid_request error, got %s", w.Body.String())
 	}
 }
 

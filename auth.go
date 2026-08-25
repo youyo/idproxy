@@ -152,7 +152,7 @@ func (a *Auth) Wrap(next http.Handler) http.Handler {
 			}
 
 			// 認証済み: User をコンテキストに注入して next に委譲
-			ctx := newContextWithUser(r.Context(), user)
+			ctx := NewContextWithUser(r.Context(), user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -189,7 +189,7 @@ func (a *Auth) Wrap(next http.Handler) http.Handler {
 				userWithToken.IDToken = sess.IDToken
 				user = &userWithToken
 			}
-			ctx := newContextWithUser(r.Context(), user)
+			ctx := NewContextWithUser(r.Context(), user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}

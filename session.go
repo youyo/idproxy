@@ -12,8 +12,10 @@ import (
 	"github.com/gorilla/securecookie"
 )
 
-// sessionCookieName はセッション Cookie の名前。
-const sessionCookieName = "_idproxy_session"
+// SessionCookieName は idproxy が発行するセッション Cookie の名前。
+// idproxy 自身の資格情報であり、この Cookie を upstream へ渡さないといった
+// 判断を周辺コンポーネントが行えるよう公開している。
+const SessionCookieName = "_idproxy_session"
 
 // SessionManager は Cookie ベースのセッション管理を担当する。
 // gorilla/securecookie を使って Cookie を暗号化・署名し、
@@ -84,7 +86,7 @@ func (sm *SessionManager) IssueSession(ctx context.Context, user *User, provider
 
 // SetCookie はセッション ID を暗号化して Set-Cookie ヘッダーを設定する。
 func (sm *SessionManager) SetCookie(w http.ResponseWriter, sessionID string) error {
-	encoded, err := sm.codec.Encode(sessionCookieName, sessionID)
+	encoded, err := sm.codec.Encode(SessionCookieName, sessionID)
 	if err != nil {
 		return fmt.Errorf("idproxy: failed to encode session cookie: %w", err)
 	}
@@ -97,14 +99,14 @@ func (sm *SessionManager) SetCookie(w http.ResponseWriter, sessionID string) err
 // Cookie が無効（改ざん等）の場合は nil, error を返す。
 // Store にセッションが存在しない（期限切れを含む）場合は nil, nil を返す。
 func (sm *SessionManager) GetSessionFromRequest(ctx context.Context, r *http.Request) (*Session, error) {
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(SessionCookieName)
 	if err != nil {
 		// http.ErrNoCookie を含む全エラーを「Cookie なし」として扱う
 		return nil, nil
 	}
 
 	var sessionID string
-	if err := sm.codec.Decode(sessionCookieName, cookie.Value, &sessionID); err != nil {
+	if err := sm.codec.Decode(SessionCookieName, cookie.Value, &sessionID); err != nil {
 		return nil, fmt.Errorf("idproxy: invalid session cookie: %w", err)
 	}
 
@@ -120,7 +122,7 @@ func (sm *SessionManager) GetSessionFromRequest(ctx context.Context, r *http.Req
 // Cookie が存在しない場合は何もしない（冪等）。
 // Cookie の復号が失敗した場合でも、MaxAge=-1 の Cookie を必ず設定する。
 func (sm *SessionManager) DeleteSession(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(SessionCookieName)
 	if err != nil {
 		// Cookie なし: 何もしない（冪等）
 		return nil
@@ -128,7 +130,7 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, w http.ResponseWrit
 
 	// 復号を試みる（成功した場合のみ Store から削除）
 	var sessionID string
-	if decErr := sm.codec.Decode(sessionCookieName, cookie.Value, &sessionID); decErr == nil {
+	if decErr := sm.codec.Decode(SessionCookieName, cookie.Value, &sessionID); decErr == nil {
 		// 復号成功: Store からセッションを削除
 		if err := sm.store.DeleteSession(ctx, sessionID); err != nil {
 			// Store 削除に失敗しても Cookie は無効化する
@@ -140,11 +142,18 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, w http.ResponseWrit
 	return nil
 }
 
-// newCookie は sessionCookieName に対応するセキュリティ属性付き Cookie を生成する。
+// newCookie は SessionCookieName に対応するセキュリティ属性付き Cookie を生成する。
 // maxAge に -1 を指定すると即時失効（MaxAge=-1）になる。
 func (sm *SessionManager) newCookie(value string, maxAge int) *http.Cookie {
+	return sm.newNamedCookie(SessionCookieName, value, maxAge)
+}
+
+// newNamedCookie は任意の名前で、セッション Cookie と同じセキュリティ属性
+// (Path / HttpOnly / Secure / SameSite) を持つ Cookie を生成する。
+// maxAge に -1 を指定すると即時失効(MaxAge=-1)になる。
+func (sm *SessionManager) newNamedCookie(name, value string, maxAge int) *http.Cookie {
 	return &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     name,
 		Value:    value,
 		Path:     "/",
 		MaxAge:   maxAge,

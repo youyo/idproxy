@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
@@ -34,8 +35,15 @@ import (
 var cookieSecret = []byte("integration-test-cookie-secret!!")
 
 // newNoRedirectClient はリダイレクトを追わない HTTP クライアントを返す。
+// ブラウザ同様に Cookie を保持する(/login が発行する binder Cookie を
+// /callback へ引き継ぐために必要)。
 func newNoRedirectClient() *http.Client {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		panic("failed to create cookie jar: " + err.Error())
+	}
 	return &http.Client{
+		Jar: jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

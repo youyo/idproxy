@@ -16,13 +16,13 @@ import (
 // testMemoryStore はテスト専用のシンプルな Store 実装。
 // store.MemoryStore は循環インポートになるため使用できない。
 type testMemoryStore struct {
-	mu              sync.Mutex
-	sessions        map[string]*Session
-	authCodes       map[string]*AuthCodeData
-	accessTokens    map[string]*AccessTokenData
-	clients         map[string]*ClientData
-	refreshTokens   map[string]*refreshTokenEntry
-	familyRevoked   map[string]time.Time
+	mu            sync.Mutex
+	sessions      map[string]*Session
+	authCodes     map[string]*AuthCodeData
+	accessTokens  map[string]*AccessTokenData
+	clients       map[string]*ClientData
+	refreshTokens map[string]*refreshTokenEntry
+	familyRevoked map[string]time.Time
 }
 
 // refreshTokenEntry はリフレッシュトークンと有効期限を保持する。
@@ -388,13 +388,13 @@ func TestSetCookie_SetsCookieHeader(t *testing.T) {
 	}
 	found := false
 	for _, c := range cookies {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("want cookie %q, not found in %v", sessionCookieName, cookies)
+		t.Errorf("want cookie %q, not found in %v", SessionCookieName, cookies)
 	}
 }
 
@@ -420,14 +420,14 @@ func TestSetCookie_SecureAttribute(t *testing.T) {
 	}
 
 	for _, c := range w.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			if !c.Secure {
 				t.Error("want Secure=true for https ExternalURL")
 			}
 			return
 		}
 	}
-	t.Errorf("cookie %q not found", sessionCookieName)
+	t.Errorf("cookie %q not found", SessionCookieName)
 }
 
 // --- T14: SetCookie_HttpOnly属性確認 ---
@@ -447,14 +447,14 @@ func TestSetCookie_HttpOnlyAttribute(t *testing.T) {
 	}
 
 	for _, c := range w.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			if !c.HttpOnly {
 				t.Error("want HttpOnly=true")
 			}
 			return
 		}
 	}
-	t.Errorf("cookie %q not found", sessionCookieName)
+	t.Errorf("cookie %q not found", SessionCookieName)
 }
 
 // --- T15: SetCookie_SameSite=Lax確認 ---
@@ -474,14 +474,14 @@ func TestSetCookie_SameSiteLax(t *testing.T) {
 	}
 
 	for _, c := range w.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			if c.SameSite != http.SameSiteLaxMode {
 				t.Errorf("want SameSite=Lax, got %v", c.SameSite)
 			}
 			return
 		}
 	}
-	t.Errorf("cookie %q not found", sessionCookieName)
+	t.Errorf("cookie %q not found", SessionCookieName)
 }
 
 // --- T05: GetSessionFromRequest_正常 ---
@@ -541,7 +541,7 @@ func TestGetSessionFromRequest_TamperedCookie(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(&http.Cookie{
-		Name:  sessionCookieName,
+		Name:  SessionCookieName,
 		Value: "this-is-not-a-valid-encrypted-value",
 	})
 
@@ -624,7 +624,7 @@ func TestDeleteSession_DeletesSessionAndCookie(t *testing.T) {
 	// Set-Cookie ヘッダーに MaxAge=-1 が含まれるか確認
 	found := false
 	for _, c := range w2.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			if c.MaxAge != -1 {
 				t.Errorf("want MaxAge=-1 for deleted cookie, got %d", c.MaxAge)
 			}
@@ -633,7 +633,7 @@ func TestDeleteSession_DeletesSessionAndCookie(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("want Set-Cookie %q with MaxAge=-1, not found", sessionCookieName)
+		t.Errorf("want Set-Cookie %q with MaxAge=-1, not found", SessionCookieName)
 	}
 }
 
@@ -703,7 +703,7 @@ func TestDeleteSession_TamperedCookie_StillClearsCookie(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(&http.Cookie{
-		Name:  sessionCookieName,
+		Name:  SessionCookieName,
 		Value: "invalid-tampered-value",
 	})
 
@@ -716,7 +716,7 @@ func TestDeleteSession_TamperedCookie_StillClearsCookie(t *testing.T) {
 	// MaxAge=-1 の Cookie が Set-Cookie されているか確認
 	found := false
 	for _, c := range w.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			if c.MaxAge != -1 {
 				t.Errorf("want MaxAge=-1, got %d", c.MaxAge)
 			}
@@ -725,6 +725,6 @@ func TestDeleteSession_TamperedCookie_StillClearsCookie(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("want Set-Cookie %q with MaxAge=-1 even on tampered cookie", sessionCookieName)
+		t.Errorf("want Set-Cookie %q with MaxAge=-1 even on tampered cookie", SessionCookieName)
 	}
 }

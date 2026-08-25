@@ -155,6 +155,15 @@ func (s *DynamoDBStore) putItemJSONNoTTL(ctx context.Context, pk string, v any) 
 // TTL 検証を行い、期限切れの場合も (nil, nil) を返す (DynamoDB TTL ラグ対策)。
 // hasTTL が false の場合は TTL チェックをスキップする (Client 用)。
 func (s *DynamoDBStore) getItemJSON(ctx context.Context, pk string, consistentRead bool, hasTTL bool, target any) (bool, error) {
+	found, _, err := s.getItemJSONWithTTL(ctx, pk, consistentRead, hasTTL, target)
+	return found, err
+}
+
+// getItemJSONWithTTL は getItemJSON と同じ取得処理に加え、アイテムに保存されている
+// `ttl` 属性（Unix epoch 秒）をそのまま返す。
+// ttl 属性が存在しない場合は nil を返す。
+// 消費時に元の有効期限を保存し直す用途（ConsumeRefreshToken）で使用する。
+func (s *DynamoDBStore) getItemJSONWithTTL(ctx context.Context, pk string, consistentRead bool, hasTTL bool, target any) (bool, *int64, error) {
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      &s.tableName,
 		ConsistentRead: &consistentRead,
@@ -163,45 +172,49 @@ func (s *DynamoDBStore) getItemJSON(ctx context.Context, pk string, consistentRe
 		},
 	})
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 
 	if len(out.Item) == 0 {
-		return false, nil
+		return false, nil, nil
 	}
 
-	// TTL ラグ対策: 取得したアイテムの ttl と現在時刻を比較する。
-	if hasTTL {
-		ttlAttr, ok := out.Item["ttl"]
-		if ok {
-			if nAttr, ok := ttlAttr.(*types.AttributeValueMemberN); ok {
-				ttlUnix, err := strconv.ParseInt(nAttr.Value, 10, 64)
-				if err != nil {
-					// ttl 属性が不正な場合はフェイルセーフで期限切れ扱い
-					return false, nil
+	// 保存されている ttl 属性を読み出す（存在しない場合は nil のまま）。
+	var storedTTL *int64
+	if ttlAttr, ok := out.Item["ttl"]; ok {
+		if nAttr, ok := ttlAttr.(*types.AttributeValueMemberN); ok {
+			ttlUnix, parseErr := strconv.ParseInt(nAttr.Value, 10, 64)
+			if parseErr != nil {
+				// ttl 属性が不正な場合はフェイルセーフで期限切れ扱い
+				if hasTTL {
+					return false, nil, nil
 				}
-				if s.now().UTC().Unix() >= ttlUnix {
-					// 期限切れ
-					return false, nil
-				}
+			} else {
+				storedTTL = &ttlUnix
 			}
 		}
 	}
 
+	// TTL ラグ対策: 取得したアイテムの ttl と現在時刻を比較する。
+	if hasTTL && storedTTL != nil && s.now().UTC().Unix() >= *storedTTL {
+		// 期限切れ
+		return false, nil, nil
+	}
+
 	dataAttr, ok := out.Item["data"]
 	if !ok {
-		return false, errors.New("data attribute not found")
+		return false, nil, errors.New("data attribute not found")
 	}
 	sAttr, ok := dataAttr.(*types.AttributeValueMemberS)
 	if !ok {
-		return false, errors.New("data attribute is not a string")
+		return false, nil, errors.New("data attribute is not a string")
 	}
 
 	if err := json.Unmarshal([]byte(sAttr.Value), target); err != nil {
-		return false, fmt.Errorf("unmarshal: %w", err)
+		return false, nil, fmt.Errorf("unmarshal: %w", err)
 	}
 
-	return true, nil
+	return true, storedTTL, nil
 }
 
 // deleteItem は DynamoDB からアイテムを削除する。冪等。
@@ -352,13 +365,17 @@ func (s *DynamoDBStore) SetAccessToken(ctx context.Context, jti string, data *id
 
 // GetAccessToken はアクセストークンを取得する。
 // 存在しない場合または期限切れの場合は (nil, nil) を返す。
+//
+// このルックアップは Bearer トークンのリボケーション判定（bearer.go の Revoked 参照）を
+// 担うため、他のセキュリティ判定と同様に強い整合性読み取り（consistentRead=true）を使う。
+// 結果整合性読み取りではリボケーション済みトークンが古いレプリカで認証を通過しうる。
 func (s *DynamoDBStore) GetAccessToken(ctx context.Context, jti string) (*idproxy.AccessTokenData, error) {
 	if err := s.checkAvailable(ctx); err != nil {
 		return nil, err
 	}
 
 	var data idproxy.AccessTokenData
-	found, err := s.getItemJSON(ctx, accessTokenPK(jti), false, true, &data)
+	found, err := s.getItemJSON(ctx, accessTokenPK(jti), true, true, &data)
 	if err != nil {
 		return nil, fmt.Errorf("dynamodb store: get access token: %w", err)
 	}
@@ -515,9 +532,9 @@ func (s *DynamoDBStore) ConsumeRefreshToken(ctx context.Context, id string) (*id
 
 	pk := refreshTokenPK(id)
 
-	// Step 1: ConsistentRead で現在の data を取得
+	// Step 1: ConsistentRead で現在の data と保存済み ttl を取得
 	var current idproxy.RefreshTokenData
-	found, err := s.getItemJSON(ctx, pk, true, true, &current)
+	found, storedTTL, err := s.getItemJSONWithTTL(ctx, pk, true, true, &current)
 	if err != nil {
 		return nil, fmt.Errorf("dynamodb store: consume refresh token (get): %w", err)
 	}
@@ -535,7 +552,6 @@ func (s *DynamoDBStore) ConsumeRefreshToken(ctx context.Context, id string) (*id
 	// ConditionExpression "attribute_exists(pk) AND used = :false" で
 	// 並行実行時に 1 つだけ成功することを保証する
 	current.Used = true
-	ttlUnix := current.ExpiresAt.UTC().Unix()
 
 	b, marshalErr := json.Marshal(&current)
 	if marshalErr != nil {
@@ -546,8 +562,13 @@ func (s *DynamoDBStore) ConsumeRefreshToken(ctx context.Context, id string) (*id
 	item := map[string]types.AttributeValue{
 		"pk":   stringAttr(pk),
 		"data": stringAttr(string(b)),
-		"ttl":  numberAttr(ttlUnix),
 		"used": &types.AttributeValueMemberBOOL{Value: true},
+	}
+	// TTL は SetRefreshToken の `ttl` 引数が権威であり、ペイロードの ExpiresAt から
+	// 再計算してはならない（ExpiresAt がゼロ値だと即時期限切れになり replay 検知が無効化される）。
+	// 保存済みの ttl 属性をそのまま引き継ぐ。
+	if storedTTL != nil {
+		item["ttl"] = numberAttr(*storedTTL)
 	}
 
 	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{

@@ -16,7 +16,6 @@ import (
 	"encoding/hex"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 
@@ -59,7 +58,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid UPSTREAM_URL: %v", err)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	proxy := idproxy.NewReverseProxy(upstream)
 
 	port := os.Getenv("PORT")
 	if port == "" {

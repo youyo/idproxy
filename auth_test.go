@@ -530,7 +530,7 @@ func TestWrap_SessionCookie_InvalidCookie(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/page", nil)
 		req.Header.Set("Accept", "text/html")
-		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "invalid-value"})
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "invalid-value"})
 		rec := httptest.NewRecorder()
 
 		a.Wrap(next).ServeHTTP(rec, req)
@@ -547,7 +547,7 @@ func TestWrap_SessionCookie_InvalidCookie(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
 		req.Header.Set("Accept", "application/json")
-		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "invalid-value"})
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "invalid-value"})
 		rec := httptest.NewRecorder()
 
 		a.Wrap(next).ServeHTTP(rec, req)

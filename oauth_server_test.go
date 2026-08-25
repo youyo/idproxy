@@ -9,10 +9,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -440,9 +442,15 @@ func setupAuthorizeServer(t *testing.T) (*OAuthServer, *SessionManager, *testMem
 		PathPrefix:   "",
 		Store:        st,
 		OAuth: &OAuthConfig{
-			SigningKey:          privateKey,
-			ClientID:            "test-oauth-client",
-			AllowedRedirectURIs: []string{"http://localhost:3000/callback", "https://app.example.com/callback"},
+			SigningKey: privateKey,
+			ClientID:   "test-oauth-client",
+			// 動的登録クライアントも運用者の許可リストを通す必要があるため、
+			// テストで使う redirect_uri はすべてここに列挙する。
+			AllowedRedirectURIs: []string{
+				"http://localhost:3000/callback",
+				"http://localhost:3000/callback?tenant=acme",
+				"https://app.example.com/callback",
+			},
 		},
 	}
 
@@ -494,6 +502,42 @@ func validAuthorizeQuery() url.Values {
 		"code_challenge_method": {"S256"},
 		"state":                 {"random-state-value"},
 		"scope":                 {"openid"},
+	}
+}
+
+// TestAuthorize_EnforcesOperatorAllowlistForStoredClient は、Store に登録済みの
+// クライアントが自分の redirect_uris に持つ URI であっても、運用者の
+// AllowedRedirectURIs を通らなければ拒否されることを検証する。
+// 同意画面が無い以上、クライアント自身の申告だけで認可コードを渡してはならない。
+func TestAuthorize_EnforcesOperatorAllowlistForStoredClient(t *testing.T) {
+	srv, sm, st := setupAuthorizeServer(t)
+
+	const clientID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	const evilURI = "https://evil.example.com/cb"
+	if err := st.SetClient(context.Background(), clientID, &ClientData{
+		ClientID:     clientID,
+		ClientName:   "Attacker App",
+		RedirectURIs: []string{evilURI},
+	}); err != nil {
+		t.Fatalf("SetClient: %v", err)
+	}
+
+	q := validAuthorizeQuery()
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", evilURI)
+
+	req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+	for _, c := range issueTestSession(t, sm) {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d; body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_request") {
+		t.Errorf("expected invalid_request error, got %s", w.Body.String())
 	}
 }
 
@@ -827,6 +871,49 @@ func TestAuthorize_AuthenticatedMultipleScopes(t *testing.T) {
 	}
 	if len(authCode.Scopes) != 3 {
 		t.Errorf("expected 3 scopes, got %d: %v", len(authCode.Scopes), authCode.Scopes)
+	}
+}
+
+func TestAuthorize_ScopeOpenIDSubstringNotAccepted(t *testing.T) {
+	// "openid" を部分文字列として含むだけのスコープは openid とみなさず、
+	// openid を先頭に自動補完する。
+	tests := []struct {
+		name  string
+		scope string
+		want  []string
+	}{
+		{name: "prefix", scope: "notopenid", want: []string{"openid", "notopenid"}},
+		{name: "suffix", scope: "openid_evil", want: []string{"openid", "openid_evil"}},
+		{name: "exact", scope: "openid", want: []string{"openid"}},
+		{name: "exact_with_others", scope: "email openid", want: []string{"email", "openid"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, sm, st := setupAuthorizeServer(t)
+			q := validAuthorizeQuery()
+			q.Set("scope", tt.scope)
+			cookies := issueTestSession(t, sm)
+
+			req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+			for _, c := range cookies {
+				req.AddCookie(c)
+			}
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+
+			if w.Code != http.StatusFound {
+				t.Fatalf("expected %d, got %d; body: %s", http.StatusFound, w.Code, w.Body.String())
+			}
+			locURL, _ := url.Parse(w.Header().Get("Location"))
+			authCode, _ := st.GetAuthCode(context.Background(), locURL.Query().Get("code"))
+			if authCode == nil {
+				t.Fatal("auth code not found in store")
+			}
+			if !slices.Equal(authCode.Scopes, tt.want) {
+				t.Errorf("expected scopes %v, got %v", tt.want, authCode.Scopes)
+			}
+		})
 	}
 }
 
@@ -1200,6 +1287,82 @@ func TestToken_Success(t *testing.T) {
 	if !authCode.Used {
 		t.Error("expected auth code Used=true after token exchange")
 	}
+	if authCode.FamilyID == "" {
+		t.Error("expected auth code FamilyID to be recorded after token exchange")
+	}
+}
+
+// TestToken_AuthCodeReuse_RevokesFamily は認可コードの二重使用を検知したとき、
+// 引き換え済みのトークンファミリーが失効し、認可コードが Store から削除されることを検証する。
+func TestToken_AuthCodeReuse_RevokesFamily(t *testing.T) {
+	srv, st, code := setupTokenServer(t)
+	ctx := context.Background()
+
+	// 1回目: 正常に引き換え
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(validTokenForm(code).Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first exchange: expected %d, got %d; body: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	var first map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&first); err != nil {
+		t.Fatalf("failed to decode first response: %v", err)
+	}
+	refreshToken, _ := first["refresh_token"].(string)
+	if refreshToken == "" {
+		t.Fatal("expected refresh_token in first response")
+	}
+
+	authCode, _ := st.GetAuthCode(ctx, code)
+	if authCode == nil {
+		t.Fatal("auth code should exist after first exchange")
+	}
+	familyID := authCode.FamilyID
+
+	// 2回目: 同じコードを再使用 → invalid_grant
+	req2 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(validTokenForm(code).Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("reuse: expected %d, got %d; body: %s", http.StatusBadRequest, w2.Code, w2.Body.String())
+	}
+	assertErrorResponse(t, w2, "invalid_grant")
+
+	// 認可コードが Store から削除されている
+	reused, err := st.GetAuthCode(ctx, code)
+	if err != nil {
+		t.Fatalf("GetAuthCode: %v", err)
+	}
+	if reused != nil {
+		t.Error("expected reused authorization code to be deleted from store")
+	}
+
+	// トークンファミリーが失効している
+	revoked, err := st.IsFamilyRevoked(ctx, familyID)
+	if err != nil {
+		t.Fatalf("IsFamilyRevoked: %v", err)
+	}
+	if !revoked {
+		t.Error("expected token family to be revoked after authorization code reuse")
+	}
+
+	// 1回目で払い出した refresh_token も使えなくなっている
+	refreshForm := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {"test-oauth-client"},
+	}
+	req3 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshForm.Encode()))
+	req3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w3 := httptest.NewRecorder()
+	srv.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusBadRequest {
+		t.Fatalf("refresh after revocation: expected %d, got %d; body: %s", http.StatusBadRequest, w3.Code, w3.Body.String())
+	}
+	assertErrorResponse(t, w3, "invalid_grant")
 }
 
 func TestToken_MethodNotAllowed(t *testing.T) {
@@ -1849,7 +2012,11 @@ func TestAuthorize_DynamicClient(t *testing.T) {
 		ExternalURL:  "http://localhost:8080",
 		CookieSecret: []byte("test-cookie-secret-32-bytes-long!"),
 		Store:        st,
-		OAuth:        &OAuthConfig{SigningKey: privateKey},
+		OAuth: &OAuthConfig{
+			SigningKey: privateKey,
+			// 動的登録クライアントも運用者の許可リストを通す必要がある。
+			AllowedRedirectURIs: []string{"https://app.example.com/callback"},
+		},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Config.Validate() failed: %v", err)
@@ -3931,5 +4098,91 @@ func TestOAuthServer_RegisterApplicationType(t *testing.T) {
 				t.Errorf("stored ApplicationType = %q, want %q", stored.ApplicationType, tt.want)
 			}
 		})
+	}
+}
+
+// /register は未認証エンドポイントのため、ボディ長・redirect_uris の件数・
+// 各 redirect_uri の長さに上限があること。
+func TestRegister_RejectsOversizedBody(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	reqBody := map[string]any{
+		"redirect_uris": []string{"https://app.example.com/callback"},
+		"client_name":   strings.Repeat("a", registerMaxBodyBytes),
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if resp["error"] != "invalid_request" {
+		t.Errorf("error = %q, want %q", resp["error"], "invalid_request")
+	}
+}
+
+func TestRegister_RejectsTooManyRedirectURIs(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	uris := make([]string, registerMaxRedirectURIs+1)
+	for i := range uris {
+		uris[i] = fmt.Sprintf("https://app.example.com/cb%d", i)
+	}
+	body, _ := json.Marshal(map[string]any{"redirect_uris": uris})
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_AcceptsMaxRedirectURIs(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	uris := make([]string, registerMaxRedirectURIs)
+	for i := range uris {
+		uris[i] = fmt.Sprintf("https://app.example.com/cb%d", i)
+	}
+	body, _ := json.Marshal(map[string]any{"redirect_uris": uris})
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRegister_RejectsOverlongRedirectURI(t *testing.T) {
+	srv := setupOAuthServer(t, "http://localhost:8080", "")
+
+	long := "https://app.example.com/callback?x=" + strings.Repeat("a", registerMaxRedirectURILen)
+	body, _ := json.Marshal(map[string]any{"redirect_uris": []string{long}})
+
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }

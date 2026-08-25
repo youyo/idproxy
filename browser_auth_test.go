@@ -1,7 +1,10 @@
 package idproxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -53,6 +56,14 @@ func setupBrowserAuth(t *testing.T, opts ...func(*Config)) (*BrowserAuth, *testu
 	ba := NewBrowserAuth(cfg, pm, sm, st)
 
 	return ba, idp
+}
+
+// copyLoginCookies は /login レスポンスの Cookie(binder Cookie を含む)を
+// /callback リクエストに引き継ぐ。実ブラウザの挙動を再現するためのヘルパー。
+func copyLoginCookies(loginRec *httptest.ResponseRecorder, req *http.Request) {
+	for _, c := range loginRec.Result().Cookies() {
+		req.AddCookie(c)
+	}
 }
 
 func TestNewBrowserAuth(t *testing.T) {
@@ -184,6 +195,7 @@ func TestCallbackHandler_FullFlow(t *testing.T) {
 	// Step 3: /callback をシミュレート
 	callbackReq := httptest.NewRequest(http.MethodGet,
 		"/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
 	callbackRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
 
@@ -201,7 +213,7 @@ func TestCallbackHandler_FullFlow(t *testing.T) {
 	cookies := callbackRec.Result().Cookies()
 	found := false
 	for _, c := range cookies {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			found = true
 			if c.Value == "" {
 				t.Error("session cookie value is empty")
@@ -232,6 +244,7 @@ func TestCallbackHandler_CognitoUsernameFallback(t *testing.T) {
 
 	code := idp.IssueCode("alice-sub", "alice@example.com", "test-client-id", nonce)
 	callbackReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
 	callbackRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
 	if callbackRec.Code != http.StatusFound {
@@ -241,7 +254,7 @@ func TestCallbackHandler_CognitoUsernameFallback(t *testing.T) {
 	// Cookie からセッションを取得して User.Name を検証
 	var sessCookie *http.Cookie
 	for _, c := range callbackRec.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			sessCookie = c
 		}
 	}
@@ -279,6 +292,7 @@ func TestCallbackHandler_PreferredUsernameFallback(t *testing.T) {
 
 	code := idp.IssueCode("bob-sub", "bob@example.com", "test-client-id", nonce)
 	callbackReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
 	callbackRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
 	if callbackRec.Code != http.StatusFound {
@@ -287,12 +301,12 @@ func TestCallbackHandler_PreferredUsernameFallback(t *testing.T) {
 
 	var sessCookie *http.Cookie
 	for _, c := range callbackRec.Result().Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == SessionCookieName {
 			sessCookie = c
 		}
 	}
 	if sessCookie == nil {
-		t.Fatalf("session cookie %q not set on callback response", sessionCookieName)
+		t.Fatalf("session cookie %q not set on callback response", SessionCookieName)
 	}
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(sessCookie)
@@ -321,6 +335,7 @@ func TestCallbackHandler_DefaultRedirect(t *testing.T) {
 
 	callbackReq := httptest.NewRequest(http.MethodGet,
 		"/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
 	callbackRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
 
@@ -380,6 +395,8 @@ func TestAuthorizeEmail_AllowedDomains(t *testing.T) {
 	ba, idp := setupBrowserAuth(t, func(cfg *Config) {
 		cfg.AllowedDomains = []string{"example.com"}
 	})
+	// email ベース認可時は email_verified が必須
+	idp.SetExtraClaims(map[string]any{"email_verified": true})
 
 	// 許可されたドメインのメール
 	loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
@@ -394,6 +411,7 @@ func TestAuthorizeEmail_AllowedDomains(t *testing.T) {
 
 	callbackReq := httptest.NewRequest(http.MethodGet,
 		"/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
 	callbackRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
 
@@ -419,6 +437,7 @@ func TestAuthorizeEmail_DeniedDomain(t *testing.T) {
 
 	callbackReq := httptest.NewRequest(http.MethodGet,
 		"/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
 	callbackRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
 
@@ -432,6 +451,8 @@ func TestAuthorizeEmail_AllowedEmails(t *testing.T) {
 		cfg.AllowedDomains = []string{"other.com"}
 		cfg.AllowedEmails = []string{"special@denied.com"}
 	})
+	// email ベース認可時は email_verified が必須
+	idp.SetExtraClaims(map[string]any{"email_verified": true})
 
 	loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 	loginRec := httptest.NewRecorder()
@@ -446,6 +467,7 @@ func TestAuthorizeEmail_AllowedEmails(t *testing.T) {
 
 	callbackReq := httptest.NewRequest(http.MethodGet,
 		"/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
 	callbackRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
 
@@ -470,12 +492,310 @@ func TestAuthorizeEmail_NoDomainOrEmailRestrictions(t *testing.T) {
 
 	callbackReq := httptest.NewRequest(http.MethodGet,
 		"/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
 	callbackRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
 
 	if callbackRec.Code != http.StatusFound {
 		t.Fatalf("no restrictions: expected 302, got %d; body: %s", callbackRec.Code, callbackRec.Body.String())
 	}
+}
+
+// nonce 不一致時のログに nonce 値(サーバ側の期待値・IdP 由来の受信値のいずれも)を
+// 出力しないことを検証する。
+func TestCallbackHandler_NonceMismatchDoesNotLogNonceValues(t *testing.T) {
+	var logBuf bytes.Buffer
+	ba, idp := setupBrowserAuth(t, func(cfg *Config) {
+		cfg.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	})
+
+	loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	loginRec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(loginRec, loginReq)
+
+	loc, err := url.Parse(loginRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("failed to parse login Location: %v", err)
+	}
+	expectedNonce := loc.Query().Get("nonce")
+	state := loc.Query().Get("state")
+
+	// IdP が別の nonce を持つ ID Token を返すケース
+	const receivedNonce = "attacker-supplied-nonce-value"
+	code := idp.IssueCode("user1", "user@example.com", "test-client-id", receivedNonce)
+
+	callbackReq := httptest.NewRequest(http.MethodGet,
+		"/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, callbackReq)
+	callbackRec := httptest.NewRecorder()
+	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
+
+	if callbackRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d; body: %s", callbackRec.Code, callbackRec.Body.String())
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "nonce mismatch") {
+		t.Fatalf("expected nonce mismatch log, got %q", logged)
+	}
+	if strings.Contains(logged, expectedNonce) {
+		t.Error("log contains the server-side expected nonce")
+	}
+	if strings.Contains(logged, receivedNonce) {
+		t.Error("log contains the caller-supplied nonce")
+	}
+}
+
+// runBrowserLogin は /login → /callback の一連のフローを実行し、callback のレスポンスを返す。
+func runBrowserLogin(t *testing.T, ba *BrowserAuth, idp *testutil.MockIdP, subject, email string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	loginRec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusFound {
+		t.Fatalf("login: expected 302, got %d", loginRec.Code)
+	}
+
+	loc, err := url.Parse(loginRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("failed to parse login Location: %v", err)
+	}
+	code := idp.IssueCode(subject, email, "test-client-id", loc.Query().Get("nonce"))
+
+	callbackReq := httptest.NewRequest(http.MethodGet,
+		"/callback?code="+code+"&state="+loc.Query().Get("state"), nil)
+	copyLoginCookies(loginRec, callbackReq)
+	callbackRec := httptest.NewRecorder()
+	ba.CallbackHandler().ServeHTTP(callbackRec, callbackReq)
+	return callbackRec
+}
+
+// email ベース認可が有効な場合、email_verified が真でなければログインを拒否する。
+// boolean と文字列の両表現を受け付け、欠落・想定外の型は未検証として扱う。
+func TestCallbackHandler_EmailVerifiedRequiredWhenEmailAuthorization(t *testing.T) {
+	tests := []struct {
+		name       string
+		extra      map[string]any
+		wantStatus int
+	}{
+		{"boolean true", map[string]any{"email_verified": true}, http.StatusFound},
+		{"string true", map[string]any{"email_verified": "true"}, http.StatusFound},
+		{"boolean false", map[string]any{"email_verified": false}, http.StatusForbidden},
+		{"string false", map[string]any{"email_verified": "false"}, http.StatusForbidden},
+		{"missing claim", nil, http.StatusForbidden},
+		{"unexpected type", map[string]any{"email_verified": 1}, http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ba, idp := setupBrowserAuth(t, func(cfg *Config) {
+				cfg.AllowedDomains = []string{"example.com"}
+			})
+			idp.SetExtraClaims(tt.extra)
+
+			rec := runBrowserLogin(t, ba, idp, "user1", "user@example.com")
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if tt.wantStatus == http.StatusForbidden &&
+				!strings.Contains(rec.Body.String(), "email not authorized") {
+				t.Errorf("expected generic rejection message, got %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+// AllowedDomains / AllowedEmails が未設定なら email_verified は要求しない（既存動作維持）。
+func TestCallbackHandler_EmailVerifiedNotRequiredWithoutRestrictions(t *testing.T) {
+	ba, idp := setupBrowserAuth(t)
+
+	rec := runBrowserLogin(t, ba, idp, "user1", "anyone@anywhere.com")
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEmailVerifiedClaim_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want bool
+	}{
+		{`true`, true},
+		{`false`, false},
+		{`"true"`, true},
+		{`"TRUE"`, true}, // strconv.ParseBool が受け付ける表記
+		{`"false"`, false},
+		{`"yes"`, false},
+		{`null`, false},
+		{`1`, false},
+		{`{}`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			var c emailVerifiedClaim
+			if err := json.Unmarshal([]byte(tt.raw), &c); err != nil {
+				t.Fatalf("Unmarshal(%s) returned error: %v", tt.raw, err)
+			}
+			if c.Bool() != tt.want {
+				t.Errorf("Unmarshal(%s) = %v, want %v", tt.raw, c.Bool(), tt.want)
+			}
+		})
+	}
+}
+
+// loginCookie は Set-Cookie 群から指定名の Cookie を返す(無ければ nil)。
+func loginCookie(rec *httptest.ResponseRecorder, name string) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// startLogin は /login を実行し、レスポンスと state を返す。
+func startLogin(t *testing.T, ba *BrowserAuth) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	loginRec := httptest.NewRecorder()
+	ba.LoginHandler().ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusFound {
+		t.Fatalf("login: expected 302, got %d", loginRec.Code)
+	}
+	loc, err := url.Parse(loginRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("failed to parse login Location: %v", err)
+	}
+	return loginRec, loc.Query().Get("state")
+}
+
+// LoginHandler が binder Cookie をセキュリティ属性付きで発行し、
+// Store には生値ではなくハッシュのみを保存することを検証する。
+func TestLoginHandler_IssuesLoginStateBinderCookie(t *testing.T) {
+	ba, _ := setupBrowserAuth(t)
+
+	loginRec, state := startLogin(t, ba)
+
+	c := loginCookie(loginRec, loginStateCookieName)
+	if c == nil {
+		t.Fatal("binder cookie not set by LoginHandler")
+	}
+	if c.Value == "" {
+		t.Fatal("binder cookie value is empty")
+	}
+	if !c.HttpOnly {
+		t.Error("binder cookie should be HttpOnly")
+	}
+	if c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("binder cookie SameSite = %v, want Lax", c.SameSite)
+	}
+	if c.Path != "/" {
+		t.Errorf("binder cookie Path = %q, want /", c.Path)
+	}
+	if c.MaxAge != int(loginStateTTL.Seconds()) {
+		t.Errorf("binder cookie MaxAge = %d, want %d", c.MaxAge, int(loginStateTTL.Seconds()))
+	}
+
+	stateData, err := ba.store.GetAuthCode(context.Background(), state)
+	if err != nil || stateData == nil {
+		t.Fatalf("state entry not found: %v", err)
+	}
+	if len(stateData.Scopes) != 1 {
+		t.Fatalf("state entry should record exactly one binder hash, got %v", stateData.Scopes)
+	}
+	if stateData.Scopes[0] == c.Value {
+		t.Error("state entry stores the raw binder; it must store only its hash")
+	}
+	if stateData.Scopes[0] != hashLoginBinder(c.Value) {
+		t.Error("state entry does not record the binder hash")
+	}
+}
+
+// binder Cookie を伴わない /callback(login CSRF)は拒否され、
+// セッションも発行されず、state エントリも消費されないこと。
+func TestCallbackHandler_RejectsCallbackWithoutBinderCookie(t *testing.T) {
+	ba, idp := setupBrowserAuth(t)
+
+	loginRec, state := startLogin(t, ba)
+	loc, _ := url.Parse(loginRec.Header().Get("Location"))
+	code := idp.IssueCode("attacker", "attacker@example.com", "test-client-id", loc.Query().Get("nonce"))
+
+	// 被害者のブラウザには binder Cookie が無い
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	ba.CallbackHandler().ServeHTTP(cbRec, cbReq)
+
+	if cbRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d; body: %s", cbRec.Code, cbRec.Body.String())
+	}
+	if loginCookie(cbRec, SessionCookieName) != nil {
+		t.Error("session cookie must not be issued for an unbound callback")
+	}
+	// state は消費しない(正規ブラウザの再試行を妨げない)
+	stateData, err := ba.store.GetAuthCode(context.Background(), state)
+	if err != nil {
+		t.Fatalf("GetAuthCode: %v", err)
+	}
+	if stateData == nil {
+		t.Error("state entry should not be consumed on binder mismatch")
+	}
+}
+
+// 別ブラウザの binder Cookie では /callback を通せないこと。
+func TestCallbackHandler_RejectsMismatchedBinderCookie(t *testing.T) {
+	ba, idp := setupBrowserAuth(t)
+
+	loginRec, state := startLogin(t, ba)
+	loc, _ := url.Parse(loginRec.Header().Get("Location"))
+	code := idp.IssueCode("attacker", "attacker@example.com", "test-client-id", loc.Query().Get("nonce"))
+
+	// 別フローで発行された binder Cookie を提示する
+	otherRec, _ := startLogin(t, ba)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil)
+	cbReq.AddCookie(loginCookie(otherRec, loginStateCookieName))
+	cbRec := httptest.NewRecorder()
+	ba.CallbackHandler().ServeHTTP(cbRec, cbReq)
+
+	if cbRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d; body: %s", cbRec.Code, cbRec.Body.String())
+	}
+	if loginCookie(cbRec, SessionCookieName) != nil {
+		t.Error("session cookie must not be issued for a mismatched binder")
+	}
+}
+
+// 成功時・失敗時のいずれでも binder Cookie が失効させられること。
+func TestCallbackHandler_ClearsBinderCookie(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		ba, idp := setupBrowserAuth(t)
+		cbRec := performLogin(t, ba, idp, "")
+		if cbRec.Code != http.StatusFound {
+			t.Fatalf("expected 302, got %d; body: %s", cbRec.Code, cbRec.Body.String())
+		}
+		c := loginCookie(cbRec, loginStateCookieName)
+		if c == nil || c.MaxAge >= 0 {
+			t.Errorf("binder cookie should be expired on success, got %+v", c)
+		}
+	})
+
+	t.Run("binder mismatch", func(t *testing.T) {
+		ba, idp := setupBrowserAuth(t)
+		loginRec, state := startLogin(t, ba)
+		loc, _ := url.Parse(loginRec.Header().Get("Location"))
+		code := idp.IssueCode("u", "u@example.com", "test-client-id", loc.Query().Get("nonce"))
+
+		cbReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil)
+		cbRec := httptest.NewRecorder()
+		ba.CallbackHandler().ServeHTTP(cbRec, cbReq)
+
+		c := loginCookie(cbRec, loginStateCookieName)
+		if c == nil || c.MaxAge >= 0 {
+			t.Errorf("binder cookie should be expired on failure, got %+v", c)
+		}
+	})
 }
 
 func TestSelectionHandler_SingleProvider_RedirectsToLogin(t *testing.T) {
@@ -643,6 +963,7 @@ func performLogin(t *testing.T, ba *BrowserAuth, idp *testutil.MockIdP, redirect
 
 	cbReq := httptest.NewRequest(http.MethodGet,
 		"/callback?code="+code+"&state="+state, nil)
+	copyLoginCookies(loginRec, cbReq)
 	cbRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(cbRec, cbReq)
 	return cbRec
@@ -825,6 +1146,7 @@ func TestCallbackHandler_HookContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = context.WithValue(ctx, testCancelKey{}, cancel)
 	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code="+code+"&state="+state, nil).WithContext(ctx)
+	copyLoginCookies(loginRec, cbReq)
 	cbRec := httptest.NewRecorder()
 	ba.CallbackHandler().ServeHTTP(cbRec, cbReq)
 

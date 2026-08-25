@@ -108,6 +108,12 @@ type AuthCodeData struct {
 	// OAuth 2.1 では認可コードは1回のみ使用可能。
 	Used bool
 
+	// FamilyID は認可コードの引き換え時に発行されたトークンファミリーの UUID v4。
+	// 引き換え前は空文字列。二重使用を検知した際に、
+	// 既に払い出された access_token / refresh_token のファミリーを
+	// まとめて失効させるために保持する。
+	FamilyID string
+
 	// IDToken は Config.StoreIDToken = true のとき、IdP が発行した生の ID Token 文字列。
 	// authorization_code → access_token 発行時に AccessTokenData に伝播される。
 	// StoreIDToken = false（デフォルト）の場合は空文字列。
@@ -157,7 +163,7 @@ type AccessTokenData struct {
 // rotation + family tracking + replay detection に使用する。
 //
 // 注意（移行）: IDToken フィールドの追加により、unkeyed struct literal
-//（例: idproxy.RefreshTokenData{"id", "family", ...}）を使用しているコードはコンパイルエラーになる。
+// （例: idproxy.RefreshTokenData{"id", "family", ...}）を使用しているコードはコンパイルエラーになる。
 // keyed literal（例: idproxy.RefreshTokenData{ID: "...", FamilyID: "..."}）に移行すること。
 type RefreshTokenData struct {
 	// ID は opaque リフレッシュトークン文字列（32バイト base64url）。

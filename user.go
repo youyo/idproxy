@@ -11,7 +11,7 @@ var userContextKey = contextKey{}
 // User は認証済みユーザーの情報を保持する。
 //
 // 注意（移行): IDToken フィールドの追加により、unkeyed struct literal
-//（例: idproxy.User{"email", "name", ...}）を使用しているコードはコンパイルエラーになる。
+// （例: idproxy.User{"email", "name", ...}）を使用しているコードはコンパイルエラーになる。
 // keyed literal（例: idproxy.User{Email: "...", Name: "..."}）に移行すること。
 type User struct {
 	// Email はユーザーのメールアドレス。
@@ -42,7 +42,9 @@ func UserFromContext(ctx context.Context) *User {
 	return u
 }
 
-// newContextWithUser は User をコンテキストに設定した新しいコンテキストを返す。
-func newContextWithUser(ctx context.Context, u *User) context.Context {
+// NewContextWithUser は User をコンテキストに設定した新しいコンテキストを返す。
+// UserFromContext と対になる公開ヘルパーで、idproxy を組み込むアプリケーションや
+// テストが認証済みコンテキストを組み立てるために使う。
+func NewContextWithUser(ctx context.Context, u *User) context.Context {
 	return context.WithValue(ctx, userContextKey, u)
 }

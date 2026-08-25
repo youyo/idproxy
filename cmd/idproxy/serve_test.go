@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	idproxy "github.com/youyo/idproxy"
 )
 
 // serveThrough は authToken 設定のプロキシへ req を通し、
@@ -166,5 +168,155 @@ func TestNewReverseProxy_AppendsToExistingXForwardedFor(t *testing.T) {
 	want := "198.51.100.7, 203.0.113.9"
 	if v := got.Header.Get("X-Forwarded-For"); v != want {
 		t.Errorf("X-Forwarded-For = %q, want %q", v, want)
+	}
+}
+
+// authenticatedRequest は Auth.Wrap 相当の認証済みコンテキストを持つリクエストを返す。
+func authenticatedRequest(req *http.Request, user *idproxy.User) *http.Request {
+	return req.WithContext(idproxy.NewContextWithUser(req.Context(), user))
+}
+
+func TestNewReverseProxy_StripsClientIdentityHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/mcp", nil)
+	spoofed := []string{
+		"X-Forwarded-User",
+		"X-Forwarded-Email",
+		"X-Forwarded-Preferred-Username",
+		"X-Forwarded-Groups",
+		"X-Auth-Request-User",
+		"X-Auth-Request-Email",
+		"X-Auth-Request-Groups",
+		"X-Auth-Request-Preferred-Username",
+		"X-Remote-User",
+		"X-Remote-Email",
+		"X-Remote-Groups",
+		"X-Authenticated-User",
+		"X-User",
+		"X-Email",
+	}
+	for _, name := range spoofed {
+		req.Header.Set(name, "admin@corp.example")
+	}
+	// 非正規形の名前で送られても（net/http サーバーは受信時に正規化する）落ちること。
+	req.Header.Set("x-auth-request-email", "admin@corp.example")
+
+	got, _ := serveThrough(t, "upstream-secret", req)
+
+	for name, vals := range got.Header {
+		for _, v := range vals {
+			if strings.Contains(v, "admin@corp.example") {
+				t.Errorf("spoofed identity leaked into header %s: %q", name, v)
+			}
+		}
+	}
+}
+
+func TestNewReverseProxy_SetsIdentityHeadersFromAuthenticatedUser(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/mcp", nil)
+	req.Header.Set("X-Forwarded-Email", "admin@corp.example")
+	req = authenticatedRequest(req, &idproxy.User{
+		Subject: "sub-123",
+		Email:   "user@corp.example",
+	})
+
+	got, _ := serveThrough(t, "upstream-secret", req)
+
+	if v := got.Header.Get("X-Forwarded-User"); v != "sub-123" {
+		t.Errorf("X-Forwarded-User = %q, want %q", v, "sub-123")
+	}
+	if v := got.Header["X-Forwarded-Email"]; len(v) != 1 || v[0] != "user@corp.example" {
+		t.Errorf("X-Forwarded-Email = %q, want exactly [%q]", v, "user@corp.example")
+	}
+}
+
+func TestNewReverseProxy_NoIdentityHeadersWhenUnauthenticated(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/mcp", nil)
+
+	got, _ := serveThrough(t, "", req)
+
+	for _, name := range []string{"X-Forwarded-User", "X-Forwarded-Email"} {
+		if v := got.Header.Get(name); v != "" {
+			t.Errorf("%s = %q, want empty (未認証時は何もセットしないこと)", name, v)
+		}
+	}
+}
+
+// Subject/Email が空の User では該当ヘッダーを付けない（空値の押し付けを避ける）。
+func TestNewReverseProxy_SkipsEmptyIdentityFields(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/mcp", nil)
+	req = authenticatedRequest(req, &idproxy.User{Subject: "sub-123"})
+
+	got, _ := serveThrough(t, "", req)
+
+	if v := got.Header.Get("X-Forwarded-User"); v != "sub-123" {
+		t.Errorf("X-Forwarded-User = %q, want %q", v, "sub-123")
+	}
+	if _, ok := got.Header["X-Forwarded-Email"]; ok {
+		t.Error("X-Forwarded-Email should be absent when User.Email is empty")
+	}
+}
+
+func TestNewReverseProxy_StripsSessionCookie(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/mcp", nil)
+	req.AddCookie(&http.Cookie{Name: "upstream_pref", Value: "dark"})
+	req.AddCookie(&http.Cookie{Name: idproxy.SessionCookieName, Value: "encrypted-session"})
+	req.AddCookie(&http.Cookie{Name: "other", Value: "keep-me"})
+
+	got, _ := serveThrough(t, "upstream-secret", req)
+
+	if _, err := got.Cookie(idproxy.SessionCookieName); err != http.ErrNoCookie {
+		t.Errorf("session cookie %q must not reach upstream (err=%v)", idproxy.SessionCookieName, err)
+	}
+	if strings.Contains(got.Header.Get("Cookie"), "encrypted-session") {
+		t.Errorf("session cookie value leaked: %q", got.Header.Get("Cookie"))
+	}
+	for name, want := range map[string]string{"upstream_pref": "dark", "other": "keep-me"} {
+		c, err := got.Cookie(name)
+		if err != nil {
+			t.Errorf("cookie %q was dropped: %v", name, err)
+			continue
+		}
+		if c.Value != want {
+			t.Errorf("cookie %q = %q, want %q", name, c.Value, want)
+		}
+	}
+}
+
+func TestNewReverseProxy_DeletesCookieHeaderWhenOnlySessionCookie(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/mcp", nil)
+	req.AddCookie(&http.Cookie{Name: idproxy.SessionCookieName, Value: "encrypted-session"})
+
+	got, _ := serveThrough(t, "upstream-secret", req)
+
+	if _, ok := got.Header["Cookie"]; ok {
+		t.Errorf("Cookie header = %q, want absent", got.Header.Get("Cookie"))
+	}
+}
+
+// UPSTREAM_AUTH_TOKEN 未設定時は既定挙動（素通し）を変えない。
+func TestNewReverseProxy_NoTokenKeepsSessionCookie(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/mcp", nil)
+	req.AddCookie(&http.Cookie{Name: idproxy.SessionCookieName, Value: "encrypted-session"})
+
+	got, _ := serveThrough(t, "", req)
+
+	c, err := got.Cookie(idproxy.SessionCookieName)
+	if err != nil {
+		t.Fatalf("session cookie should pass through when no token is set: %v", err)
+	}
+	if c.Value != "encrypted-session" {
+		t.Errorf("session cookie = %q, want %q", c.Value, "encrypted-session")
+	}
+}
+
+// セッション Cookie が無いリクエストでは Cookie ヘッダーに触れない。
+func TestNewReverseProxy_LeavesOtherCookiesUntouched(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/mcp", nil)
+	req.Header.Set("Cookie", "a=1; b=2")
+
+	got, _ := serveThrough(t, "upstream-secret", req)
+
+	if v := got.Header.Get("Cookie"); v != "a=1; b=2" {
+		t.Errorf("Cookie = %q, want %q", v, "a=1; b=2")
 	}
 }

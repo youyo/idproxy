@@ -14,10 +14,17 @@ import (
 
 // --- BearerValidator テスト用ヘルパー ---
 
-// setupBearerValidator はテスト用の BearerValidator を構築する。
+// setupBearerValidator はテスト用の BearerValidator を構築する（StoreIDToken=false）。
 // MockIdP の秘密鍵を OAuthConfig.SigningKey に設定し、
 // ExternalURL を issuer として使用する。
 func setupBearerValidator(t *testing.T) (*BearerValidator, *testMemoryStore, *testutil.MockIdP) {
+	t.Helper()
+	return setupBearerValidatorWithStoreIDToken(t, false)
+}
+
+// setupBearerValidatorWithStoreIDToken は Config.StoreIDToken を指定して
+// テスト用の BearerValidator を構築する。
+func setupBearerValidatorWithStoreIDToken(t *testing.T, storeIDToken bool) (*BearerValidator, *testMemoryStore, *testutil.MockIdP) {
 	t.Helper()
 
 	idp := testutil.NewMockIdP(t)
@@ -34,6 +41,7 @@ func setupBearerValidator(t *testing.T) (*BearerValidator, *testMemoryStore, *te
 		ExternalURL:  "http://localhost:8080",
 		CookieSecret: []byte("test-cookie-secret-32-bytes-long!"),
 		Store:        st,
+		StoreIDToken: storeIDToken,
 		OAuth: &OAuthConfig{
 			SigningKey: idp.PrivateKey(),
 		},
@@ -376,10 +384,10 @@ func TestBearerValidator_Validate_MalformedToken(t *testing.T) {
 	}
 }
 
-// TestBearerValidator_Validate_IDToken_Propagated は StoreIDToken=true 相当の
+// TestBearerValidator_Validate_IDToken_Propagated は StoreIDToken=true のとき
 // AccessTokenData.IDToken が bearer 検証後に User.IDToken に伝播することを検証する。
 func TestBearerValidator_Validate_IDToken_Propagated(t *testing.T) {
-	bv, st, idp := setupBearerValidator(t)
+	bv, st, idp := setupBearerValidatorWithStoreIDToken(t, true)
 	ctx := context.Background()
 
 	jti := "test-jti-idtoken"
@@ -442,5 +450,41 @@ func TestBearerValidator_Validate_IDToken_Empty(t *testing.T) {
 	}
 	if user.IDToken != "" {
 		t.Errorf("IDToken should be empty when StoreIDToken=false, got %q", user.IDToken)
+	}
+}
+
+// TestBearerValidator_Validate_IDToken_NotLeakedAfterDisable は
+// StoreIDToken=true のときに発行され Store に IDToken を持つアクセストークンでも、
+// StoreIDToken を false に切り替えた後は User.IDToken に伝播しないことを検証する。
+func TestBearerValidator_Validate_IDToken_NotLeakedAfterDisable(t *testing.T) {
+	bv, st, idp := setupBearerValidatorWithStoreIDToken(t, false)
+	ctx := context.Background()
+
+	jti := "test-jti-stale-idtoken"
+	email := "user@example.com"
+	sub := "sub-stale-idtoken"
+	name := "Test User"
+	exp := time.Now().Add(time.Hour)
+
+	// StoreIDToken=true の時代に発行された既存トークンを模す。
+	_ = st.SetAccessToken(ctx, jti, &AccessTokenData{
+		JTI:       jti,
+		Subject:   sub,
+		Email:     email,
+		ClientID:  "test-client-id",
+		IssuedAt:  time.Now(),
+		ExpiresAt: exp,
+		Revoked:   false,
+		IDToken:   "eyJhbGciOiJSUzI1NiJ9.stale-id-token",
+	}, time.Hour)
+
+	token := issueTestToken(t, idp, "http://localhost:8080", "http://localhost:8080", sub, email, name, jti, exp)
+
+	user, err := bv.Validate(ctx, token)
+	if err != nil {
+		t.Fatalf("Validate() returned error: %v", err)
+	}
+	if user.IDToken != "" {
+		t.Errorf("IDToken should not be propagated when StoreIDToken=false, got %q", user.IDToken)
 	}
 }

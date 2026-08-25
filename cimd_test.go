@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -119,6 +120,12 @@ func TestCIMD_IsCIMDClientID(t *testing.T) {
 		{"empty", "", false},
 		{"custom scheme", "ftp://example.com/client.json", false},
 		{"not a url", "://", false},
+		// userinfo は outbound の Authorization: Basic ヘッダーに化けるため拒否する。
+		{"userinfo with password", "https://user:pass@example.com/client.json", false},
+		{"userinfo without password", "https://user@example.com/client.json", false},
+		{"query", "https://example.com/client.json?a=b", false},
+		{"empty query marker", "https://example.com/client.json?", false},
+		{"fragment", "https://example.com/client.json#frag", false},
 	}
 
 	for _, tt := range tests {
@@ -127,6 +134,74 @@ func TestCIMD_IsCIMDClientID(t *testing.T) {
 				t.Errorf("isCIMDClientID(%q) = %v, want %v", tt.clientID, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCIMD_CanonicalClientID はキャッシュキーの正規化を検証する。
+func TestCIMD_CanonicalClientID(t *testing.T) {
+	tests := []struct {
+		name     string
+		clientID string
+		want     string
+	}{
+		{"already canonical", "https://example.com/client.json", "https://example.com/client.json"},
+		{"uppercase host", "https://EXAMPLE.com/client.json", "https://example.com/client.json"},
+		{"default port dropped", "https://example.com:443/client.json", "https://example.com/client.json"},
+		{"uppercase host with default port", "https://ExAmPlE.COM:443/client.json", "https://example.com/client.json"},
+		{"non default port kept", "https://example.com:8443/client.json", "https://example.com:8443/client.json"},
+		{"ipv6 literal", "https://[2001:db8::1]/client.json", "https://[2001:db8::1]/client.json"},
+		{"ipv6 literal with default port", "https://[2001:DB8::1]:443/client.json", "https://[2001:db8::1]/client.json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := parseCIMDClientID(tt.clientID)
+			if err != nil {
+				t.Fatalf("parseCIMDClientID(%q) failed: %v", tt.clientID, err)
+			}
+			if got := canonicalCIMDClientID(u); got != tt.want {
+				t.Errorf("canonicalCIMDClientID(%q) = %q, want %q", tt.clientID, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCIMD_Resolve_ReturnsDefensiveCopy は resolve の戻り値を書き換えても
+// キャッシュ(プロセス共有・未認証入力がキー)が汚染されないことを検証する。
+func TestCIMD_Resolve_ReturnsDefensiveCopy(t *testing.T) {
+	ts := newCIMDDocumentServer(t, validCIMDDocument())
+	f := newTestCIMDFetcher(t, ts)
+	clientID := ts.clientID("/client.json")
+
+	first, err := f.resolve(context.Background(), clientID)
+	if err != nil {
+		t.Fatalf("resolve() failed: %v", err)
+	}
+	first.RedirectURIs[0] = "https://evil.example.com/cb"
+	first.ClientName = "Poisoned"
+
+	second, err := f.resolve(context.Background(), clientID)
+	if err != nil {
+		t.Fatalf("second resolve() failed: %v", err)
+	}
+	if got := ts.fetches.Load(); got != 1 {
+		t.Fatalf("expected the second resolve to hit the cache, got %d fetches", got)
+	}
+	if second.RedirectURIs[0] != "http://localhost:3000/callback" {
+		t.Errorf("cache was poisoned via the returned slice: %v", second.RedirectURIs)
+	}
+	if second.ClientName != "CIMD Test App" {
+		t.Errorf("cache was poisoned via the returned struct: %q", second.ClientName)
+	}
+
+	// 2 回目の戻り値を書き換えても 3 回目には影響しない。
+	second.RedirectURIs[0] = "https://evil.example.com/cb"
+	third, err := f.resolve(context.Background(), clientID)
+	if err != nil {
+		t.Fatalf("third resolve() failed: %v", err)
+	}
+	if third.RedirectURIs[0] != "http://localhost:3000/callback" {
+		t.Errorf("cache was poisoned via a cached-copy slice: %v", third.RedirectURIs)
 	}
 }
 
@@ -153,9 +228,37 @@ func TestCIMD_DenyInternalIP(t *testing.T) {
 		{"IPv6 ULA", "fd00::1", true},
 		{"IPv4-mapped loopback", "::ffff:127.0.0.1", true},
 		{"IPv4-mapped private", "::ffff:10.0.0.1", true},
+
+		// NAT64（DNS64/NAT64 の IPv6-only ネットワークで実際に到達しうる）
+		{"NAT64 loopback", "64:ff9b::7f00:1", true},
+		{"NAT64 link-local metadata", "64:ff9b::a9fe:a9fe", true},
+		{"NAT64 private", "64:ff9b::a00:1", true},
+		{"NAT64 Azure WireServer", "64:ff9b::a83f:8110", true},
+		{"NAT64 public", "64:ff9b::808:808", false},
+
+		// IPv4-compatible IPv6（廃止済みだが解決結果としては現れうる）
+		{"IPv4-compatible loopback", "::7f00:1", true},
+		{"IPv4-compatible metadata", "::a9fe:a9fe", true},
+
+		// 6to4
+		{"6to4 loopback", "2002:7f00:1::1", true},
+		{"6to4 private", "2002:a00:1::1", true},
+		{"6to4 metadata", "2002:a9fe:a9fe::1", true},
+		{"6to4 public", "2002:808:808::1", false},
+
+		// その他のレンジ
+		{"IPv4 broadcast", "255.255.255.255", true},
+		{"IPv4 this-network non-zero", "0.1.2.3", true},
+		{"IPv6 site-local deprecated", "fec0::1", true},
+		{"IPv6 documentation", "2001:db8::1", true},
+		{"IETF protocol assignments", "192.0.0.1", true},
+		{"benchmarking", "198.18.0.1", true},
+		{"Azure WireServer", "168.63.129.16", true},
+
 		{"public IPv4", "8.8.8.8", false},
 		{"public IPv4 below CGNAT", "100.63.255.255", false},
 		{"public IPv4 above CGNAT", "100.128.0.0", false},
+		{"public IPv4 next to Azure WireServer", "168.63.129.17", false},
 		{"public IPv6", "2001:4860:4860::8888", false},
 	}
 
@@ -168,6 +271,10 @@ func TestCIMD_DenyInternalIP(t *testing.T) {
 			err := denyInternalIP(ip)
 			if tt.blocked && err == nil {
 				t.Errorf("denyInternalIP(%s) = nil, want error", tt.ip)
+			}
+			// 拒否理由（対象 IP を含む）はエラーに残す。ログ専用で、認可応答には出さない。
+			if tt.blocked && err != nil && !strings.Contains(err.Error(), ip.String()) {
+				t.Errorf("denyInternalIP(%s) error %q should name the blocked address", tt.ip, err)
 			}
 			if !tt.blocked && err != nil {
 				t.Errorf("denyInternalIP(%s) = %v, want nil", tt.ip, err)
@@ -218,7 +325,9 @@ func TestCIMD_Resolve_RejectsLoopbackTarget(t *testing.T) {
 
 func TestCIMD_Resolve_Success(t *testing.T) {
 	doc := validCIMDDocument()
-	doc["redirect_uris"] = []string{"http://localhost:3000/callback", "myapp://cb"}
+	// カスタムスキーム（myapp://cb）は validateCIMDDocument が拒否するようになったため、
+	// 2 件目は https を使う。
+	doc["redirect_uris"] = []string{"http://localhost:3000/callback", "https://app.example.com/cb"}
 	doc["scope"] = "openid email"
 	ts := newCIMDDocumentServer(t, doc)
 	f := newTestCIMDFetcher(t, ts)
@@ -279,6 +388,29 @@ func TestCIMD_Resolve_RejectsInvalidDocument(t *testing.T) {
 			doc: map[string]any{
 				"client_name":   "Hostless Redirect App",
 				"redirect_uris": []string{"https:///callback"},
+			},
+		},
+		{
+			// http の外部ホストは攻撃者が用意した平文の受け口になりうるため拒否する。
+			name: "redirect_uri http on remote host",
+			doc: map[string]any{
+				"client_name":   "Plain HTTP App",
+				"redirect_uris": []string{"http://evil.example.com/cb"},
+			},
+		},
+		{
+			// カスタムスキームは端末上の任意アプリに横取りされうるため拒否する。
+			name: "redirect_uri custom scheme",
+			doc: map[string]any{
+				"client_name":   "Custom Scheme App",
+				"redirect_uris": []string{"myapp://cb"},
+			},
+		},
+		{
+			name: "redirect_uri mixes https and custom scheme",
+			doc: map[string]any{
+				"client_name":   "Mixed App",
+				"redirect_uris": []string{"https://app.example.com/cb", "myapp://cb"},
 			},
 		},
 	}
@@ -573,4 +705,131 @@ func TestCIMD_Fetcher_ProductionDefaults(t *testing.T) {
 	if f.maxEntries != cimdMaxCacheEntries {
 		t.Errorf("expected maxEntries %d, got %d", cimdMaxCacheEntries, f.maxEntries)
 	}
+	if got := cap(f.sem); got != cimdMaxConcurrentFetches {
+		t.Errorf("expected fetch concurrency limit %d, got %d", cimdMaxConcurrentFetches, got)
+	}
+}
+
+// TestCIMD_Fetcher_NoProxy は Transport がプロキシを一切使わないことを検証する。
+// プロキシ経由になると dialContext の IP ポリシー（resolve-then-dial-by-IP）が
+// プロキシの IP にしか効かず、実際の接続先への SSRF 防御が無効化される。
+func TestCIMD_Fetcher_NoProxy(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.example.com:3128")
+	t.Setenv("HTTP_PROXY", "http://proxy.example.com:3128")
+
+	f := newCIMDFetcher(denyInternalIP)
+
+	tr, ok := f.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", f.httpClient.Transport)
+	}
+	if tr.Proxy != nil {
+		req := httptest.NewRequest(http.MethodGet, "https://example.com/client.json", nil)
+		proxyURL, err := tr.Proxy(req)
+		t.Fatalf("expected Transport.Proxy to be nil, got a proxy func returning (%v, %v)", proxyURL, err)
+	}
+}
+
+// TestCIMD_Resolve_NegativeCache は失敗した client_id が短期間キャッシュされ、
+// その間は再 fetch されないこと、かつ常にエラーを返す(成功に化けない)ことを検証する。
+func TestCIMD_Resolve_NegativeCache(t *testing.T) {
+	ts := newCIMDTestServer(t, func(w http.ResponseWriter, r *http.Request, count int64) {
+		if count == 1 {
+			// 攻撃者のサーバーは no-store を返してキャッシュを無効化しようとする。
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeCIMDDocument(w, r, validCIMDDocument())
+	})
+	f := newTestCIMDFetcher(t, ts)
+
+	base := time.Now()
+	f.now = func() time.Time { return base }
+	clientID := ts.clientID("/client.json")
+
+	for i := 0; i < 3; i++ {
+		if _, err := f.resolve(context.Background(), clientID); err == nil {
+			t.Fatalf("resolve() #%d = nil error, want error", i+1)
+		}
+	}
+	if got := ts.fetches.Load(); got != 1 {
+		t.Errorf("expected 1 fetch while the failure is negatively cached, got %d", got)
+	}
+
+	// ネガティブキャッシュの期限が切れたら再試行する。
+	f.now = func() time.Time { return base.Add(cimdNegativeTTL + time.Second) }
+	if _, err := f.resolve(context.Background(), clientID); err != nil {
+		t.Fatalf("resolve() after negative TTL failed: %v", err)
+	}
+	if got := ts.fetches.Load(); got != 2 {
+		t.Errorf("expected re-fetch after negative TTL, got %d fetches", got)
+	}
+}
+
+// TestCIMD_Resolve_SingleFlight は同一 client_id への並行 resolve が
+// 1 回の fetch にまとまることを検証する。
+// キャッシュによる抑止と区別するため、応答は no-store(＝キャッシュしない)にしている。
+func TestCIMD_Resolve_SingleFlight(t *testing.T) {
+	release := make(chan struct{})
+	ts := newCIMDTestServer(t, func(w http.ResponseWriter, r *http.Request, _ int64) {
+		<-release
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		writeCIMDDocument(w, r, validCIMDDocument())
+	})
+	f := newTestCIMDFetcher(t, ts)
+	clientID := ts.clientID("/client.json")
+
+	const callers = 8
+	errs := make(chan error, callers)
+	resolve := func() {
+		_, err := f.resolve(context.Background(), clientID)
+		errs <- err
+	}
+
+	// 先着の 1 本がハンドラへ到達し、inflight に登録されるまで待つ。
+	go resolve()
+	waitForCondition(t, "leader fetch to start", func() bool {
+		f.mu.RLock()
+		defer f.mu.RUnlock()
+		return len(f.inflight) == 1
+	})
+
+	var ready sync.WaitGroup
+	ready.Add(callers - 1)
+	for i := 1; i < callers; i++ {
+		go func() {
+			ready.Done()
+			resolve()
+		}()
+	}
+	ready.Wait()
+	// 後続が resolve に入り、待ち合わせに乗るまでの猶予。
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	for i := 0; i < callers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("resolve() #%d failed: %v", i+1, err)
+		}
+	}
+	if got := ts.fetches.Load(); got != 1 {
+		t.Errorf("expected concurrent resolves to collapse into 1 fetch, got %d", got)
+	}
+}
+
+// waitForCondition は cond が true になるまで短くポーリングする。
+func waitForCondition(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }

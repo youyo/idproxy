@@ -17,6 +17,9 @@ type BearerValidator struct {
 	publicKey *ecdsa.PublicKey
 	issuer    string
 	parser    *jwt.Parser
+	// storeIDToken は Config.StoreIDToken の写し。
+	// false の場合、Store に IDToken が残っていても User.IDToken には伝播しない。
+	storeIDToken bool
 }
 
 // NewBearerValidator は BearerValidator を構築する。
@@ -40,10 +43,11 @@ func NewBearerValidator(cfg Config, store Store) (*BearerValidator, error) {
 	)
 
 	return &BearerValidator{
-		store:     store,
-		publicKey: &ecKey.PublicKey,
-		issuer:    cfg.ExternalURL,
-		parser:    parser,
+		store:        store,
+		publicKey:    &ecKey.PublicKey,
+		issuer:       cfg.ExternalURL,
+		parser:       parser,
+		storeIDToken: cfg.StoreIDToken,
 	}, nil
 }
 
@@ -55,7 +59,7 @@ func NewBearerValidator(cfg Config, store Store) (*BearerValidator, error) {
 //  2. jti クレームの存在確認
 //  3. email クレームの存在確認
 //  4. Store でリボケーションチェック（jti で検索）
-//  5. 成功時: User を構築して返す
+//  5. 成功時: User を構築して返す（IDToken は Config.StoreIDToken=true のときのみ付与）
 func (v *BearerValidator) Validate(ctx context.Context, tokenStr string) (*User, error) {
 	// 1. JWT パース + 署名検証 + exp/iss 検証
 	token, err := v.parser.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
@@ -110,7 +114,13 @@ func (v *BearerValidator) Validate(ctx context.Context, tokenStr string) (*User,
 		Name:    name,
 		Subject: sub,
 		Issuer:  oidcIssuer,
-		IDToken: tokenData.IDToken,
+	}
+	// StoreIDToken が有効な場合のみ IdP の ID Token を伝播する。
+	// 発行側（oauth_server.go）とセッション経路（auth.go）と同じゲートを適用することで、
+	// StoreIDToken を false に切り替えた後は、切り替え前に発行済みのアクセストークンでも
+	// ID Token が下流に漏れないようにする。
+	if v.storeIDToken {
+		user.IDToken = tokenData.IDToken
 	}
 
 	return user, nil

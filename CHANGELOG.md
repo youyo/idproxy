@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (2026-08-25)
+
+- security(cimd): SSRF 対策を強化
+  - CIMD fetch がプロキシ経由でプライベート/リンクローカル/メタデータアドレスに到達できないよう禁止
+  - IP アドレスポリシー判定を IPv4/IPv6 双方で網羅
+  - CIMD レスポンスのフェッチサイズに上限を追加
+  - `client_id` の受理前サニタイズを追加
+- security(auth): login CSRF 対策として `state` をブラウザ（Cookie）に束縛
+- security(oauth): ID Token の `email_verified` クレームを検証
+- security(oauth): `redirect_uri` の許可リストチェックをリダイレクト全経路で統一
+- security(store/memory): `MemoryStore` に防御的コピーを導入し、内部状態の共有によるデータ競合を修正
+- security(store/dynamodb): リボケーション判定のための整合性読み取りと `ConsumeRefreshToken` の TTL 処理を修正
+- security(proxy): upstream へのリバースプロキシで、クライアント由来の ID ヘッダ・セッション Cookie を必ず剥がす `NewReverseProxy` を追加
+- security(oauth): `/register` エンドポイントのリクエストボディサイズに上限を追加
+- security(oauth): `openid` スコープ判定の部分一致誤判定を修正
+- security(bearer): Bearer 認証で ID Token 未発行時のアクセスを拒否するゲートを追加
+- security(oauth): `nonce` の値をログに出力しないよう抑止
+- security(store): 認可コード再利用検出時に同一ファミリのトークンを失効
+
 ### Added
 
 - feat(config): `OnAuthenticated` フック / `DefaultPostLoginPath` / `PostLoginRedirectValidator` を `Config` に追加
